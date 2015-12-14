@@ -21,8 +21,7 @@ __metaclass__ = type
 
 import os
 
-from six import iteritems
-
+from ansible.compat.six import iteritems
 from ansible.errors import AnsibleParserError
 from ansible.parsing.splitter import split_args, parse_kv
 from ansible.parsing.yaml.objects import AnsibleBaseYAMLObject, AnsibleMapping
@@ -56,9 +55,9 @@ class PlaybookInclude(Base, Conditional, Taggable):
         # playbook objects
         new_obj = super(PlaybookInclude, self).load_data(ds, variable_manager, loader)
 
-        all_vars = dict()
+        all_vars = self.vars.copy()
         if variable_manager:
-            all_vars = variable_manager.get_vars(loader=loader)
+            all_vars.update(variable_manager.get_vars(loader=loader))
 
         templar = Templar(loader=loader, variables=all_vars)
         if not new_obj.evaluate_conditional(templar=templar, all_vars=all_vars):
@@ -67,7 +66,7 @@ class PlaybookInclude(Base, Conditional, Taggable):
         # then we use the object to load a Playbook
         pb = Playbook(loader=loader)
 
-        file_name = new_obj.include
+        file_name = templar.template(new_obj.include)
         if not os.path.isabs(file_name):
             file_name = os.path.join(basedir, file_name)
 
@@ -108,8 +107,6 @@ class PlaybookInclude(Base, Conditional, Taggable):
             else:
                 # some basic error checking, to make sure vars are properly
                 # formatted and do not conflict with k=v parameters
-                # FIXME: we could merge these instead, but controlling the order
-                #        in which they're encountered could be difficult
                 if k == 'vars':
                     if 'vars' in new_ds:
                         raise AnsibleParserError("include parameters cannot be mixed with 'vars' entries for include statements", obj=ds)
@@ -130,8 +127,6 @@ class PlaybookInclude(Base, Conditional, Taggable):
         if len(items) == 0:
             raise AnsibleParserError("include statements must specify the file name to include", obj=ds)
         else:
-            # FIXME/TODO: validate that items[0] is a file, which also
-            #             exists and is readable
             new_ds['include'] = items[0]
             if len(items) > 1:
                 # rejoin the parameter portion of the arguments and
@@ -140,7 +135,6 @@ class PlaybookInclude(Base, Conditional, Taggable):
                 if 'tags' in params:
                     new_ds['tags'] = params.pop('tags')
                 if 'vars' in new_ds:
-                    # FIXME: see fixme above regarding merging vars
                     raise AnsibleParserError("include parameters cannot be mixed with 'vars' entries for include statements", obj=ds)
                 new_ds['vars'] = params
 

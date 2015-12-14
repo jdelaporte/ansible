@@ -34,8 +34,8 @@ ANSIBLE_VERSION = "<<ANSIBLE_VERSION>>"
 MODULE_ARGS = "<<INCLUDE_ANSIBLE_MODULE_ARGS>>"
 MODULE_COMPLEX_ARGS = "<<INCLUDE_ANSIBLE_MODULE_COMPLEX_ARGS>>"
 
-BOOLEANS_TRUE = ['yes', 'on', '1', 'true', 1]
-BOOLEANS_FALSE = ['no', 'off', '0', 'false', 0]
+BOOLEANS_TRUE = ['yes', 'on', '1', 'true', 1, True]
+BOOLEANS_FALSE = ['no', 'off', '0', 'false', 0, False]
 BOOLEANS = BOOLEANS_TRUE + BOOLEANS_FALSE
 
 SELINUX_SPECIAL_FS="<<SELINUX_SPECIAL_FILESYSTEMS>>"
@@ -54,7 +54,6 @@ import pipes
 import shlex
 import subprocess
 import sys
-import syslog
 import types
 import time
 import select
@@ -66,7 +65,13 @@ import grp
 import pwd
 import platform
 import errno
-from itertools import repeat
+from itertools import repeat, chain
+
+try:
+    import syslog
+    HAS_SYSLOG=True
+except ImportError:
+    HAS_SYSLOG=False
 
 try:
     # Python 2
@@ -104,9 +109,24 @@ except AttributeError:
         return d.items()
 else:
     # Python 2
-    def iteritems(d):               # Python 2
+    def iteritems(d):
         return d.iteritems()
 
+try:
+    NUMBERTYPES = (int, long, float)
+except NameError:
+    # Python 3
+    NUMBERTYPES = (int, float)
+
+# Python2 & 3 way to get NoneType
+NoneType = type(None)
+
+try:
+    from collections import Sequence, Mapping
+except ImportError:
+    # python2.5
+    Sequence = (list, tuple)
+    Mapping = (dict,)
 
 try:
     import json
@@ -193,7 +213,7 @@ except ImportError:
             elif isinstance(node, ast.List):
                 return list(map(_convert, node.nodes))
             elif isinstance(node, ast.Dict):
-                return dict((_convert(k), _convert(v)) for k, v in node.items)
+                return dict((_convert(k), _convert(v)) for k, v in node.items())
             elif isinstance(node, ast.Name):
                 if node.name in _safe_names:
                     return _safe_names[node.name]
@@ -344,7 +364,70 @@ def json_dict_bytes_to_unicode(d, encoding='utf-8'):
     else:
         return d
 
-def heuristic_log_sanitize(data):
+def return_values(obj):
+    """ Return stringified values from datastructures. For use with removing
+    sensitive values pre-jsonification."""
+    if isinstance(obj, basestring):
+        if obj:
+            if isinstance(obj, bytes):
+                yield obj
+            else:
+                # Unicode objects should all convert to utf-8
+                # (still must deal with surrogateescape on python3)
+                yield obj.encode('utf-8')
+        return
+    elif isinstance(obj, Sequence):
+        for element in obj:
+            for subelement in return_values(element):
+                yield subelement
+    elif isinstance(obj, Mapping):
+        for element in obj.items():
+            for subelement in return_values(element[1]):
+                yield subelement
+    elif isinstance(obj, (bool, NoneType)):
+        # This must come before int because bools are also ints
+        return
+    elif isinstance(obj, NUMBERTYPES):
+        yield str(obj)
+    else:
+        raise TypeError('Unknown parameter type: %s, %s' % (type(obj), obj))
+
+def remove_values(value, no_log_strings):
+    """ Remove strings in no_log_strings from value.  If value is a container
+    type, then remove a lot more"""
+    if isinstance(value, basestring):
+        if isinstance(value, unicode):
+            # This should work everywhere on python2. Need to check
+            # surrogateescape on python3
+            bytes_value = value.encode('utf-8')
+            value_is_unicode = True
+        else:
+            bytes_value = value
+            value_is_unicode = False
+        if bytes_value in no_log_strings:
+            return 'VALUE_SPECIFIED_IN_NO_LOG_PARAMETER'
+        for omit_me in no_log_strings:
+            bytes_value = bytes_value.replace(omit_me, '*' * 8)
+        if value_is_unicode:
+            value = unicode(bytes_value, 'utf-8', errors='replace')
+        else:
+            value = bytes_value
+    elif isinstance(value, Sequence):
+        return [remove_values(elem, no_log_strings) for elem in value]
+    elif isinstance(value, Mapping):
+        return dict((k, remove_values(v, no_log_strings)) for k, v in value.items())
+    elif isinstance(value, tuple(chain(NUMBERTYPES, (bool, NoneType)))):
+        stringy_value = str(value)
+        if stringy_value in no_log_strings:
+            return 'VALUE_SPECIFIED_IN_NO_LOG_PARAMETER'
+        for omit_me in no_log_strings:
+            if omit_me in stringy_value:
+                return 'VALUE_SPECIFIED_IN_NO_LOG_PARAMETER'
+    else:
+        raise TypeError('Value of unknown type: %s, %s' % (type(value), value))
+    return value
+
+def heuristic_log_sanitize(data, no_log_values=None):
     ''' Remove strings that look like passwords from log messages '''
     # Currently filters:
     # user:pass@foo/whatever and http://username:pass@wherever/foo
@@ -401,8 +484,10 @@ def heuristic_log_sanitize(data):
             output.insert(0, data[begin:sep + 1])
             prev_begin = begin
 
-    return ''.join(output)
-
+    output = ''.join(output)
+    if no_log_values:
+        output = remove_values(output, no_log_values)
+    return output
 
 def is_executable(path):
     '''is the given path executable?'''
@@ -437,11 +522,21 @@ class AnsibleModule(object):
                 if k not in self.argument_spec:
                     self.argument_spec[k] = v
 
+        self.params = self._load_params()
+
+        # Save parameter values that should never be logged
+        self.no_log_values = set()
+        # Use the argspec to determine which args are no_log
+        for arg_name, arg_opts in self.argument_spec.items():
+            if arg_opts.get('no_log', False):
+                # Find the value for the no_log'd param
+                no_log_object = self.params.get(arg_name, None)
+                if no_log_object:
+                    self.no_log_values.update(return_values(no_log_object))
+
         # check the locale as set by the current environment, and
         # reset to LANG=C if it's an invalid/unavailable locale
         self._check_locale()
-
-        self.params = self._load_params()
 
         self._legal_inputs = ['_ansible_check_mode', '_ansible_no_log', '_ansible_debug']
 
@@ -475,6 +570,7 @@ class AnsibleModule(object):
             self._check_required_if(required_if)
 
         self._set_defaults(pre=False)
+
         if not self.no_log:
             self._log_invocation()
 
@@ -960,8 +1056,8 @@ class AnsibleModule(object):
             # issues but is preferable to simply failing because
             # of an unknown locale
             locale.setlocale(locale.LC_ALL, 'C')
-            os.environ['LANG']     = 'C'
-            os.environ['LC_CTYPE'] = 'C'
+            os.environ['LANG'] = 'C'
+            os.environ['LC_ALL'] = 'C'
             os.environ['LC_MESSAGES'] = 'C'
         except Exception:
             e = get_exception()
@@ -1246,9 +1342,10 @@ class AnsibleModule(object):
         return params
 
     def _log_to_syslog(self, msg):
-        module = 'ansible-%s' % os.path.basename(__file__)
-        syslog.openlog(str(module), 0, syslog.LOG_USER)
-        syslog.syslog(syslog.LOG_INFO, msg)
+        if HAS_SYSLOG:
+            module = 'ansible-%s' % os.path.basename(__file__)
+            syslog.openlog(str(module), 0, syslog.LOG_USER)
+            syslog.syslog(syslog.LOG_INFO, msg)
 
     def debug(self, msg):
         if self._debug:
@@ -1262,23 +1359,37 @@ class AnsibleModule(object):
                 log_args = dict()
 
             module = 'ansible-%s' % os.path.basename(__file__)
+            if isinstance(module, bytes):
+                module = module.decode('utf-8', 'replace')
 
             # 6655 - allow for accented characters
-            if isinstance(msg, unicode):
-                # We should never get here as msg should be type str, not unicode
-                msg = msg.encode('utf-8')
+            if not isinstance(msg, (bytes, unicode)):
+                raise TypeError("msg should be a string (got %s)" % type(msg))
 
-            if (has_journal):
+            # We want journal to always take text type
+            # syslog takes bytes on py2, text type on py3
+            if isinstance(msg, bytes):
+                journal_msg = remove_values(msg.decode('utf-8', 'replace'), self.no_log_values)
+            else:
+                # TODO: surrogateescape is a danger here on Py3
+                journal_msg = remove_values(msg, self.no_log_values)
+
+            if sys.version_info >= (3,):
+                syslog_msg = journal_msg
+            else:
+                syslog_msg = journal_msg.encode('utf-8', 'replace')
+
+            if has_journal:
                 journal_args = [("MODULE", os.path.basename(__file__))]
                 for arg in log_args:
                     journal_args.append((arg.upper(), str(log_args[arg])))
                 try:
-                    journal.send("%s %s" % (module, msg), **dict(journal_args))
+                    journal.send(u"%s %s" % (module, journal_msg), **dict(journal_args))
                 except IOError:
                     # fall back to syslog since logging to journal failed
-                    self._log_to_syslog(msg)
+                    self._log_to_syslog(syslog_msg)
             else:
-                self._log_to_syslog(msg)
+                self._log_to_syslog(syslog_msg)
 
     def _log_invocation(self):
         ''' log that ansible ran the module '''
@@ -1302,7 +1413,7 @@ class AnsibleModule(object):
                     param_val = str(param_val)
                 elif isinstance(param_val, unicode):
                     param_val = param_val.encode('utf-8')
-                log_args[param] = heuristic_log_sanitize(param_val)
+                log_args[param] = heuristic_log_sanitize(param_val, self.no_log_values)
 
         msg = []
         for arg in log_args:
@@ -1373,7 +1484,7 @@ class AnsibleModule(object):
         ''' return a bool for the arg '''
         if arg is None or type(arg) == bool:
             return arg
-        if type(arg) in types.StringTypes:
+        if isinstance(arg, basestring):
             arg = arg.lower()
         if arg in BOOLEANS_TRUE:
             return True
@@ -1413,6 +1524,7 @@ class AnsibleModule(object):
         self.add_path_info(kwargs)
         if not 'changed' in kwargs:
             kwargs['changed'] = False
+        kwargs = remove_values(kwargs, self.no_log_values)
         self.do_cleanup_files()
         print(self.jsonify(kwargs))
         sys.exit(0)
@@ -1422,6 +1534,7 @@ class AnsibleModule(object):
         self.add_path_info(kwargs)
         assert 'msg' in kwargs, "implementation error -- msg to explain the error is required"
         kwargs['failed'] = True
+        kwargs = remove_values(kwargs, self.no_log_values)
         self.do_cleanup_files()
         print(self.jsonify(kwargs))
         sys.exit(1)
@@ -1672,7 +1785,8 @@ class AnsibleModule(object):
                     continue
                 else:
                     is_passwd = True
-            clean_args.append(heuristic_log_sanitize(arg))
+            arg = heuristic_log_sanitize(arg, self.no_log_values)
+            clean_args.append(arg)
         clean_args = ' '.join(pipes.quote(arg) for arg in clean_args)
 
         if data:
@@ -1768,7 +1882,7 @@ class AnsibleModule(object):
             self.fail_json(rc=257, msg=traceback.format_exc(), cmd=clean_args)
 
         if rc != 0 and check_rc:
-            msg = heuristic_log_sanitize(stderr.rstrip())
+            msg = heuristic_log_sanitize(stderr.rstrip(), self.no_log_values)
             self.fail_json(cmd=clean_args, rc=rc, stdout=stdout, stderr=stderr, msg=msg)
 
         # reset the pwd

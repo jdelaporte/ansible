@@ -19,7 +19,7 @@
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
-from six import iteritems, string_types
+from ansible.compat.six import iteritems
 
 import os
 
@@ -37,10 +37,10 @@ from ansible.utils.vars import combine_vars
 
 __all__ = ['Role', 'hash_params']
 
-# FIXME: this should be a utility function, but can't be a member of
-#        the role due to the fact that it would require the use of self
-#        in a static method. This is also used in the base class for
-#        strategies (ansible/plugins/strategy/__init__.py)
+# TODO: this should be a utility function, but can't be a member of
+#       the role due to the fact that it would require the use of self
+#       in a static method. This is also used in the base class for
+#       strategies (ansible/plugins/strategy/__init__.py)
 def hash_params(params):
     if not isinstance(params, dict):
         return params
@@ -61,6 +61,7 @@ def hash_params(params):
 class Role(Base, Become, Conditional, Taggable):
 
     _delegate_to = FieldAttribute(isa='string')
+    _delegate_facts = FieldAttribute(isa='bool', default=False)
 
     def __init__(self, play=None):
         self._role_name        = None
@@ -128,7 +129,6 @@ class Role(Base, Become, Conditional, Taggable):
             return r
 
         except RuntimeError:
-            # FIXME: needs a better way to access the ds in the role include
             raise AnsibleError("A recursion loop was detected with the roles specified. Make sure child roles do not have dependencies on parent roles", obj=role_include._ds)
 
     def _load_role_data(self, role_include, parent_role=None):
@@ -150,7 +150,7 @@ class Role(Base, Become, Conditional, Taggable):
         current_when = getattr(self, 'when')[:]
         current_when.extend(role_include.when)
         setattr(self, 'when', current_when)
-        
+
         current_tags = getattr(self, 'tags')[:]
         current_tags.extend(role_include.tags)
         setattr(self, 'tags', current_tags)
@@ -172,11 +172,17 @@ class Role(Base, Become, Conditional, Taggable):
 
         task_data = self._load_role_yaml('tasks')
         if task_data:
-            self._task_blocks = load_list_of_blocks(task_data, play=self._play, role=self, loader=self._loader)
+            try:
+                self._task_blocks = load_list_of_blocks(task_data, play=self._play, role=self, loader=self._loader)
+            except AssertionError:
+                raise AnsibleParserError("The tasks/main.yml file for role '%s' must contain a list of tasks" % self._role_name , obj=task_data)
 
         handler_data = self._load_role_yaml('handlers')
         if handler_data:
-            self._handler_blocks = load_list_of_blocks(handler_data, play=self._play, role=self, use_handlers=True, loader=self._loader)
+            try:
+                self._handler_blocks = load_list_of_blocks(handler_data, play=self._play, role=self, use_handlers=True, loader=self._loader)
+            except:
+                raise AnsibleParserError("The handlers/main.yml file for role '%s' must contain a list of tasks" % self._role_name , obj=task_data)
 
         # vars and default vars are regular dictionaries
         self._role_vars  = self._load_role_yaml('vars')
@@ -244,7 +250,6 @@ class Role(Base, Become, Conditional, Taggable):
         return self._parents
 
     def get_default_vars(self):
-        # FIXME: get these from dependent roles too
         default_vars = dict()
         for dep in self.get_all_dependencies():
             default_vars = combine_vars(default_vars, dep.get_default_vars())

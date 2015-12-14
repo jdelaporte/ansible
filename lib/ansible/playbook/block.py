@@ -34,6 +34,7 @@ class Block(Base, Become, Conditional, Taggable):
     _rescue = FieldAttribute(isa='list', default=[])
     _always = FieldAttribute(isa='list', default=[])
     _delegate_to = FieldAttribute(isa='list')
+    _delegate_facts = FieldAttribute(isa='bool', default=False)
 
     # for future consideration? this would be functionally
     # similar to the 'else' clause for exceptions
@@ -323,8 +324,9 @@ class Block(Base, Become, Conditional, Taggable):
         Override for the 'tags' getattr fetcher, used from Base.
         '''
         environment = self._attributes['environment']
-        if environment is None:
-            environment = self._get_parent_attribute('environment', extend=True)
+        parent_environment = self._get_parent_attribute('environment', extend=True)
+        if parent_environment is not None:
+            environment = self._extend_value(environment, parent_environment)
 
         return environment
 
@@ -339,7 +341,9 @@ class Block(Base, Become, Conditional, Taggable):
             for task in target:
                 if isinstance(task, Block):
                     tmp_list.append(evaluate_block(task))
-                elif task.action in ('meta', 'include') or task.evaluate_tags(play_context.only_tags, play_context.skip_tags, all_vars=all_vars):
+                elif task.action == 'meta' \
+                or (task.action == 'include' and task.evaluate_tags([], play_context.skip_tags, all_vars=all_vars)) \
+                or task.evaluate_tags(play_context.only_tags, play_context.skip_tags, all_vars=all_vars):
                     tmp_list.append(task)
             return tmp_list
 

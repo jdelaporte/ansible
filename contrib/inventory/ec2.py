@@ -141,6 +141,7 @@ except ImportError:
 
 
 class Ec2Inventory(object):
+
     def _empty_inventory(self):
         return {"_meta" : {"hostvars" : {}}}
 
@@ -321,11 +322,22 @@ class Ec2Inventory(object):
         self.cache_path_index = cache_dir + "/ansible-ec2.index"
         self.cache_max_age = config.getint('ec2', 'cache_max_age')
 
+        if config.has_option('ec2', 'expand_csv_tags'):
+            self.expand_csv_tags = config.getboolean('ec2', 'expand_csv_tags')
+        else:
+            self.expand_csv_tags = False
+
         # Configure nested groups instead of flat namespace.
         if config.has_option('ec2', 'nested_groups'):
             self.nested_groups = config.getboolean('ec2', 'nested_groups')
         else:
             self.nested_groups = False
+
+        # Replace dash or not in group names
+        if config.has_option('ec2', 'replace_dash_in_groups'):
+            self.replace_dash_in_groups = config.getboolean('ec2', 'replace_dash_in_groups')
+        else:
+            self.replace_dash_in_groups = True
 
         # Configure which groups should be created.
         group_by_options = [
@@ -360,7 +372,7 @@ class Ec2Inventory(object):
                 self.pattern_include = re.compile(pattern_include)
             else:
                 self.pattern_include = None
-        except configparser.NoOptionError as e:
+        except configparser.NoOptionError:
             self.pattern_include = None
 
         # Do we need to exclude hosts that match a pattern?
@@ -370,7 +382,7 @@ class Ec2Inventory(object):
                 self.pattern_exclude = re.compile(pattern_exclude)
             else:
                 self.pattern_exclude = None
-        except configparser.NoOptionError as e:
+        except configparser.NoOptionError:
             self.pattern_exclude = None
 
         # Instance filters (see boto and EC2 API docs). Ignore invalid filters.
@@ -690,14 +702,21 @@ class Ec2Inventory(object):
         # Inventory: Group by tag keys
         if self.group_by_tag_keys:
             for k, v in instance.tags.items():
-                if v:
-                    key = self.to_safe("tag_" + k + "=" + v)
+                if self.expand_csv_tags and v and ',' in v:
+                    values = map(lambda x: x.strip(), v.split(','))
                 else:
-                    key = self.to_safe("tag_" + k)
-                self.push(self.inventory, key, dest)
-                if self.nested_groups:
-                    self.push_group(self.inventory, 'tags', self.to_safe("tag_" + k))
-                    self.push_group(self.inventory, self.to_safe("tag_" + k), key)
+                    values = [v]
+
+                for v in values:
+                    if v:
+                        key = self.to_safe("tag_" + k + "=" + v)
+                    else:
+                        key = self.to_safe("tag_" + k)
+                    self.push(self.inventory, key, dest)
+                    if self.nested_groups:
+                        self.push_group(self.inventory, 'tags', self.to_safe("tag_" + k))
+                        if v:
+                            self.push_group(self.inventory, self.to_safe("tag_" + k), key)
 
         # Inventory: Group by Route53 domain names if enabled
         if self.route53_enabled and self.group_by_route53_names:
@@ -1113,6 +1132,8 @@ class Ec2Inventory(object):
                 instance_vars['ec2_placement'] = value.zone
             elif key == 'ec2_tags':
                 for k, v in value.items():
+                    if self.expand_csv_tags and ',' in v:
+                        v = map(lambda x: x.strip(), v.split(','))
                     key = self.to_safe('ec2_tag_' + k)
                     instance_vars[key] = v
             elif key == 'ec2_groups':
@@ -1285,10 +1306,11 @@ class Ec2Inventory(object):
         return re.sub('([a-z0-9])([A-Z])', r'\1_\2', temp).lower()
 
     def to_safe(self, word):
-        ''' Converts 'bad' characters in a string to underscores so they can be
-        used as Ansible groups '''
-
-        return re.sub("[^A-Za-z0-9\_]", "_", word)
+        ''' Converts 'bad' characters in a string to underscores so they can be used as Ansible groups '''
+        regex = "[^A-Za-z0-9\_"
+        if not self.replace_dash_in_groups:
+            regex += "\-"
+        return re.sub(regex + "]", "_", word)
 
     def json_format_dict(self, data, pretty=False):
         ''' Converts a dict to a JSON object and dumps it as a formatted
@@ -1302,3 +1324,4 @@ class Ec2Inventory(object):
 
 # Run the script
 Ec2Inventory()
+

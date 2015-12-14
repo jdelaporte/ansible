@@ -33,16 +33,23 @@ from ansible import __version__
 from ansible import constants as C
 from ansible.errors import AnsibleError, AnsibleOptionsError
 from ansible.utils.unicode import to_bytes
-from ansible.utils.display import Display
+
+try:
+    from __main__ import display
+except ImportError:
+    from ansible.utils.display import Display
+    display = Display()
+
 
 class SortedOptParser(optparse.OptionParser):
     '''Optparser which sorts the options by opt before outputting --help'''
 
-    #FIXME: epilog parsing: OptionParser.format_epilog = lambda self, formatter: self.epilog
+    # TODO: epilog parsing: OptionParser.format_epilog = lambda self, formatter: self.epilog
 
     def format_help(self, formatter=None, epilog=None):
         self.option_list.sort(key=operator.methodcaller('get_opt_string'))
         return optparse.OptionParser.format_help(self, formatter=None)
+
 
 class CLI(object):
     ''' code behind bin/ansible* programs '''
@@ -59,7 +66,7 @@ class CLI(object):
     LESS_OPTS = 'FRSX'  # -F (quit-if-one-screen) -R (allow raw ansi control chars)
                         # -S (chop long lines) -X (disable termcap init and de-init)
 
-    def __init__(self, args, display=None):
+    def __init__(self, args, callback=None):
         """
         Base init method for all command line programs
         """
@@ -68,11 +75,7 @@ class CLI(object):
         self.options = None
         self.parser = None
         self.action = None
-
-        if display is None:
-            self.display = Display()
-        else:
-            self.display = display
+        self.callback = callback
 
     def set_action(self):
         """
@@ -102,30 +105,22 @@ class CLI(object):
 
         if self.options.verbosity > 0:
             if C.CONFIG_FILE:
-                self.display.display("Using %s as config file" % C.CONFIG_FILE)
+                display.display("Using %s as config file" % C.CONFIG_FILE)
             else:
-                self.display.display("No config file found; using defaults")
+                display.display("No config file found; using defaults")
 
     @staticmethod
-    def ask_vault_passwords(ask_vault_pass=False, ask_new_vault_pass=False, confirm_vault=False, confirm_new=False):
+    def ask_vault_passwords(ask_new_vault_pass=False, rekey=False):
         ''' prompt for vault password and/or password change '''
 
         vault_pass = None
         new_vault_pass = None
-
         try:
-            if ask_vault_pass:
+            if rekey or not ask_new_vault_pass:
                 vault_pass = getpass.getpass(prompt="Vault password: ")
-
-            if ask_vault_pass and confirm_vault:
-                vault_pass2 = getpass.getpass(prompt="Confirm Vault password: ")
-                if vault_pass != vault_pass2:
-                    raise AnsibleError("Passwords do not match")
 
             if ask_new_vault_pass:
                 new_vault_pass = getpass.getpass(prompt="New Vault password: ")
-
-            if ask_new_vault_pass and confirm_new:
                 new_vault_pass2 = getpass.getpass(prompt="Confirm New Vault password: ")
                 if new_vault_pass != new_vault_pass2:
                     raise AnsibleError("Passwords do not match")
@@ -138,8 +133,10 @@ class CLI(object):
         if new_vault_pass:
             new_vault_pass = to_bytes(new_vault_pass, errors='strict', nonstring='simplerepr').strip()
 
-        return vault_pass, new_vault_pass
+        if ask_new_vault_pass and not rekey:
+            vault_pass = new_vault_pass
 
+        return vault_pass, new_vault_pass
 
     def ask_passwords(self):
         ''' prompt for connection and become passwords if needed '''
@@ -169,7 +166,6 @@ class CLI(object):
 
         return (sshpass, becomepass)
 
-
     def normalize_become_options(self):
         ''' this keeps backwards compatibility with sudo/su self.options '''
         self.options.become_ask_pass = self.options.become_ask_pass or self.options.ask_sudo_pass or self.options.ask_su_pass or C.DEFAULT_BECOME_ASK_PASS
@@ -184,7 +180,6 @@ class CLI(object):
             self.options.become = True
             self.options.become_method = 'su'
 
-
     def validate_conflicts(self, vault_opts=False, runas_opts=False, fork_opts=False):
         ''' check for conflicting options '''
 
@@ -195,15 +190,11 @@ class CLI(object):
             if (op.ask_vault_pass and op.vault_password_file):
                 self.parser.error("--ask-vault-pass and --vault-password-file are mutually exclusive")
 
-
         if runas_opts:
             # Check for privilege escalation conflicts
-            if (op.su or op.su_user or op.ask_su_pass) and \
-                        (op.sudo or op.sudo_user or op.ask_sudo_pass) or \
-                (op.su or op.su_user or op.ask_su_pass) and \
-                        (op.become or op.become_user or op.become_ask_pass) or \
-                (op.sudo or op.sudo_user or op.ask_sudo_pass) and \
-                        (op.become or op.become_user or op.become_ask_pass):
+            if (op.su or op.su_user) and (op.sudo or op.sudo_user) or \
+                (op.su or op.su_user) and (op.become or op.become_user) or \
+                (op.sudo or op.sudo_user) and (op.become or op.become_user):
 
                 self.parser.error("Sudo arguments ('--sudo', '--sudo-user', and '--ask-sudo-pass') "
                                   "and su arguments ('-su', '--su-user', and '--ask-su-pass') "
@@ -220,11 +211,11 @@ class CLI(object):
 
     @staticmethod
     def base_parser(usage="", output_opts=False, runas_opts=False, meta_opts=False, runtask_opts=False, vault_opts=False, module_opts=False,
-        async_opts=False, connect_opts=False, subset_opts=False, check_opts=False, inventory_opts=False, epilog=None, fork_opts=False):
+            async_opts=False, connect_opts=False, subset_opts=False, check_opts=False, inventory_opts=False, epilog=None, fork_opts=False, runas_prompt_opts=False):
         ''' create an options parser for most ansible scripts '''
 
-        #FIXME: implemente epilog parsing
-        #OptionParser.format_epilog = lambda self, formatter: self.epilog
+        # TODO: implement epilog parsing
+        #       OptionParser.format_epilog = lambda self, formatter: self.epilog
 
         # base opts
         parser = SortedOptParser(usage, version=CLI.version("%prog"))
@@ -233,7 +224,7 @@ class CLI(object):
 
         if inventory_opts:
             parser.add_option('-i', '--inventory-file', dest='inventory',
-                help="specify inventory host file (default=%s)" % C.DEFAULT_HOST_LIST,
+                help="specify inventory host path (default=%s) or comma separated host list" % C.DEFAULT_HOST_LIST,
                 default=C.DEFAULT_HOST_LIST, action="callback", callback=CLI.expand_tilde, type=str)
             parser.add_option('--list-hosts', dest='listhosts', action='store_true',
                 help='outputs a list of matching hosts; does not execute anything else')
@@ -253,17 +244,15 @@ class CLI(object):
                 help="specify number of parallel processes to use (default=%s)" % C.DEFAULT_FORKS)
 
         if vault_opts:
-            parser.add_option('--ask-vault-pass', default=False, dest='ask_vault_pass', action='store_true',
+            parser.add_option('--ask-vault-pass', default=C.DEFAULT_ASK_VAULT_PASS, dest='ask_vault_pass', action='store_true',
                 help='ask for vault password')
-            parser.add_option('--vault-password-file', default=C.DEFAULT_VAULT_PASSWORD_FILE,
-                dest='vault_password_file', help="vault password file", action="callback",
-                callback=CLI.expand_tilde, type=str)
-            parser.add_option('--new-vault-password-file',
-                dest='new_vault_password_file', help="new vault password file for rekey", action="callback",
-                callback=CLI.expand_tilde, type=str)
+            parser.add_option('--vault-password-file', default=C.DEFAULT_VAULT_PASSWORD_FILE, dest='vault_password_file',
+                help="vault password file", action="callback", callback=CLI.expand_tilde, type=str)
+            parser.add_option('--new-vault-password-file', dest='new_vault_password_file',
+                help="new vault password file for rekey", action="callback", callback=CLI.expand_tilde, type=str)
             parser.add_option('--output', default=None, dest='output_file',
-                help='output file name for encrypt or decrypt; use - for stdout')
-
+                help='output file name for encrypt or decrypt; use - for stdout',
+                action="callback", callback=CLI.expand_tilde, type=str)
 
         if subset_opts:
             parser.add_option('-t', '--tags', dest='tags', default='all',
@@ -279,10 +268,6 @@ class CLI(object):
 
         if runas_opts:
             # priv user defaults to root later on to enable detecting when this option was given here
-            parser.add_option('-K', '--ask-sudo-pass', default=C.DEFAULT_ASK_SUDO_PASS, dest='ask_sudo_pass', action='store_true',
-                help='ask for sudo password (deprecated, use become)')
-            parser.add_option('--ask-su-pass', default=C.DEFAULT_ASK_SU_PASS, dest='ask_su_pass', action='store_true',
-                help='ask for su password (deprecated, use become)')
             parser.add_option("-s", "--sudo", default=C.DEFAULT_SUDO, action="store_true", dest='sudo',
                 help="run operations with sudo (nopasswd) (deprecated, use become)")
             parser.add_option('-U', '--sudo-user', dest='sudo_user', default=None,
@@ -299,9 +284,14 @@ class CLI(object):
                 help="privilege escalation method to use (default=%s), valid choices: [ %s ]" % (C.DEFAULT_BECOME_METHOD, ' | '.join(C.BECOME_METHODS)))
             parser.add_option('--become-user', default=None, dest='become_user', type='string',
                 help='run operations as this user (default=%s)' % C.DEFAULT_BECOME_USER)
+
+        if runas_opts or runas_prompt_opts:
+            parser.add_option('-K', '--ask-sudo-pass', default=C.DEFAULT_ASK_SUDO_PASS, dest='ask_sudo_pass', action='store_true',
+                help='ask for sudo password (deprecated, use become)')
+            parser.add_option('--ask-su-pass', default=C.DEFAULT_ASK_SU_PASS, dest='ask_su_pass', action='store_true',
+                help='ask for su password (deprecated, use become)')
             parser.add_option('--ask-become-pass', default=False, dest='become_ask_pass', action='store_true',
                 help='ask for privilege escalation password')
-
 
         if connect_opts:
             parser.add_option('-k', '--ask-pass', default=C.DEFAULT_ASK_PASS, dest='ask_pass', action='store_true',
@@ -353,7 +343,11 @@ class CLI(object):
         if gitinfo:
             result = result + " {0}".format(gitinfo)
         result += "\n  config file = %s" % C.CONFIG_FILE
-        result = result + "\n  configured module search path = %s" % C.DEFAULT_MODULE_PATH
+        if C.DEFAULT_MODULE_PATH is None:
+            cpath = "Default w/o overrides"
+        else:
+            cpath = C.DEFAULT_MODULE_PATH
+        result = result + "\n  configured module search path = %s" % cpath
         return result
 
     @staticmethod
@@ -430,7 +424,7 @@ class CLI(object):
         result = CLI._git_repo_info(repo_path)
         submodules = os.path.join(basedir, '.gitmodules')
         if not os.path.exists(submodules):
-           return result
+            return result
         f = open(submodules)
         for line in f:
             tokens = line.strip().split(' ')
@@ -443,21 +437,20 @@ class CLI(object):
         f.close()
         return result
 
-
     def pager(self, text):
         ''' find reasonable way to display text '''
         # this is a much simpler form of what is in pydoc.py
         if not sys.stdout.isatty():
-            self.display.display(text)
+            display.display(text)
         elif 'PAGER' in os.environ:
             if sys.platform == 'win32':
-                self.display.display(text)
+                display.display(text)
             else:
                 self.pager_pipe(text, os.environ['PAGER'])
         elif subprocess.call('(less --version) 2> /dev/null', shell = True) == 0:
             self.pager_pipe(text, 'less')
         else:
-            self.display.display(text)
+            display.display(text)
 
     @staticmethod
     def pager_pipe(text, cmd):
@@ -524,4 +517,3 @@ class CLI(object):
             if os.pathsep in data:
                 data = data.split(os.pathsep)[0]
         return data
-

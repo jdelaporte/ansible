@@ -19,26 +19,27 @@
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
+import collections
 import itertools
 import operator
 import uuid
 
 from functools import partial
 from inspect import getmembers
-from io import FileIO
 
-from six import iteritems, string_types, text_type
+from ansible.compat.six import iteritems, string_types
 
 from jinja2.exceptions import UndefinedError
 
 from ansible.errors import AnsibleParserError
-from ansible.parsing import DataLoader
+from ansible.parsing.dataloader import DataLoader
 from ansible.playbook.attribute import Attribute, FieldAttribute
-from ansible.template import Templar
 from ansible.utils.boolean import boolean
-from ansible.utils.debug import debug
 from ansible.utils.vars import combine_vars, isidentifier
-from ansible.template import template
+from ansible.utils.unicode import to_unicode
+
+BASE_ATTRIBUTES = {}
+
 
 class Base:
 
@@ -48,11 +49,14 @@ class Base:
     _remote_user         = FieldAttribute(isa='string')
 
     # variables
-    _vars                = FieldAttribute(isa='dict', default=dict(), priority=100)
+    _vars                = FieldAttribute(isa='dict', priority=100)
 
     # flags and misc. settings
     _environment         = FieldAttribute(isa='list')
     _no_log              = FieldAttribute(isa='bool')
+    _always_run           = FieldAttribute(isa='bool')
+    _run_once             = FieldAttribute(isa='bool')
+    _ignore_errors        = FieldAttribute(isa='bool')
 
     # param names which have been deprecated/removed
     DEPRECATED_ATTRIBUTES = [
@@ -73,12 +77,9 @@ class Base:
         # and initialize the base attributes
         self._initialize_base_attributes()
 
-        try:
-            from __main__ import display
-            self._display = display
-        except ImportError:
-            from ansible.utils.display import Display
-            self._display = Display()
+        # and init vars, avoid using defaults in field declaration as it lives across plays
+        self.vars = dict()
+
 
     # The following three functions are used to programatically define data
     # descriptors (aka properties) for the Attributes of all of the playbook
@@ -123,12 +124,19 @@ class Base:
         Returns the list of attributes for this class (or any subclass thereof).
         If the attribute name starts with an underscore, it is removed
         '''
+
+        # check cache before retrieving attributes
+        if self.__class__ in BASE_ATTRIBUTES:
+            return BASE_ATTRIBUTES[self.__class__]
+
+        # Cache init
         base_attributes = dict()
         for (name, value) in getmembers(self.__class__):
             if isinstance(value, Attribute):
-               if name.startswith('_'):
-                   name = name[1:]
-               base_attributes[name] = value
+                if name.startswith('_'):
+                    name = name[1:]
+                base_attributes[name] = value
+        BASE_ATTRIBUTES[self.__class__] = base_attributes
         return base_attributes
 
     def _initialize_base_attributes(self):
@@ -183,8 +191,6 @@ class Base:
 
         # Walk all attributes in the class. We sort them based on their priority
         # so that certain fields can be loaded before others, if they are dependent.
-        # FIXME: we currently don't do anything with private attributes but
-        #        may later decide to filter them out of 'ds' here.
         base_attributes = self._get_base_attributes()
         for name, attr in sorted(base_attributes.items(), key=operator.itemgetter(1)):
             # copy the value over unless a _load_field method is defined
@@ -239,7 +245,8 @@ class Base:
                 value = getattr(self, name)
                 if value is not None:
                     if attribute.isa == 'string' and isinstance(value, (list, dict)):
-                        raise AnsibleParserError("The field '%s' is supposed to be a string type, however the incoming data structure is a %s" % (name, type(value)), obj=self.get_ds())
+                        raise AnsibleParserError("The field '%s' is supposed to be a string type,"
+                                " however the incoming data structure is a %s" % (name, type(value)), obj=self.get_ds())
 
     def copy(self):
         '''
@@ -249,7 +256,13 @@ class Base:
         new_me = self.__class__()
 
         for name in self._get_base_attributes():
-            setattr(new_me, name, getattr(self, name))
+            attr_val = getattr(self, name)
+            if isinstance(attr_val, collections.Sequence):
+                setattr(new_me, name, attr_val[:])
+            elif isinstance(attr_val, collections.Mapping):
+                setattr(new_me, name, attr_val.copy())
+            else:
+                setattr(new_me, name, attr_val)
 
         new_me._loader           = self._loader
         new_me._variable_manager = self._variable_manager
@@ -266,10 +279,6 @@ class Base:
         all the variables.  Run basic types (from isa) as well as
         any _post_validate_<foo> functions.
         '''
-
-        basedir = None
-        if self._loader is not None:
-            basedir = self._loader.get_basedir()
 
         # save the omit value for later checking
         omit_value = templar._available_variables.get('omit')
@@ -306,7 +315,7 @@ class Base:
                 # and make sure the attribute is of the type it should be
                 if value is not None:
                     if attribute.isa == 'string':
-                        value = text_type(value)
+                        value = to_unicode(value)
                     elif attribute.isa == 'int':
                         value = int(value)
                     elif attribute.isa == 'float':
@@ -327,7 +336,8 @@ class Base:
                         if attribute.listof is not None:
                             for item in value:
                                 if not isinstance(item, attribute.listof):
-                                    raise AnsibleParserError("the field '%s' should be a list of %s, but the item '%s' is a %s" % (name, attribute.listof, item, type(item)), obj=self.get_ds())
+                                    raise AnsibleParserError("the field '%s' should be a list of %s,"
+                                            " but the item '%s' is a %s" % (name, attribute.listof, item, type(item)), obj=self.get_ds())
                                 elif attribute.required and attribute.listof == string_types:
                                     if item is None or item.strip() == "":
                                         raise AnsibleParserError("the field '%s' is required, and cannot have empty values" % (name,), obj=self.get_ds())
@@ -349,10 +359,12 @@ class Base:
                 setattr(self, name, value)
 
             except (TypeError, ValueError) as e:
-                raise AnsibleParserError("the field '%s' has an invalid value (%s), and could not be converted to an %s. Error was: %s" % (name, value, attribute.isa, e), obj=self.get_ds())
+                raise AnsibleParserError("the field '%s' has an invalid value (%s), and could not be converted to an %s."
+                        " Error was: %s" % (name, value, attribute.isa, e), obj=self.get_ds())
             except UndefinedError as e:
                 if templar._fail_on_undefined_errors and name != 'name':
-                    raise AnsibleParserError("the field '%s' has an invalid value, which appears to include a variable that is undefined. The error was: %s" % (name,e), obj=self.get_ds())
+                    raise AnsibleParserError("the field '%s' has an invalid value, which appears to include a variable that is undefined."
+                            " The error was: %s" % (name,e), obj=self.get_ds())
 
     def serialize(self):
         '''
@@ -438,7 +450,7 @@ class Base:
             new_value = [ new_value ]
 
         #return list(set(value + new_value))
-        return [i for i,_ in itertools.groupby(value + new_value)]
+        return [i for i,_ in itertools.groupby(value + new_value) if i is not None]
 
     def __getstate__(self):
         return self.serialize()
@@ -446,4 +458,3 @@ class Base:
     def __setstate__(self, data):
         self.__init__()
         self.deserialize(data)
-

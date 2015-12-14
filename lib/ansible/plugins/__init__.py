@@ -26,6 +26,8 @@ import inspect
 import os
 import os.path
 import sys
+import warnings
+
 from collections import defaultdict
 
 from ansible import constants as C
@@ -211,15 +213,6 @@ class PluginLoader:
     def find_plugin(self, name, mod_type=''):
         ''' Find a plugin named name '''
 
-        # The particular cache to look for modules within.  This matches the
-        # requested mod_type
-        pull_cache = self._plugin_path_cache[mod_type]
-        try:
-            return pull_cache[name]
-        except KeyError:
-            # Cache miss.  Now let's find the plugin
-            pass
-
         if mod_type:
             suffix = mod_type
         elif self.class_name:
@@ -230,13 +223,21 @@ class PluginLoader:
             # they can have any suffix
             suffix = ''
 
-        ### FIXME:
-        # Instead of using the self._paths cache (PATH_CACHE) and
-        # self._searched_paths we could use an iterator.  Before enabling that
-        # we need to make sure we don't want to add additional directories
-        # (add_directory()) once we start using the iterator.  Currently, it
-        # looks like _get_paths() never forces a cache refresh so if we expect
-        # additional directories to be added later, it is buggy.
+        # The particular cache to look for modules within.  This matches the
+        # requested mod_type
+        pull_cache = self._plugin_path_cache[suffix]
+        try:
+            return pull_cache[name]
+        except KeyError:
+            # Cache miss.  Now let's find the plugin
+            pass
+
+        # TODO: Instead of using the self._paths cache (PATH_CACHE) and
+        #       self._searched_paths we could use an iterator.  Before enabling that
+        #       we need to make sure we don't want to add additional directories
+        #       (add_directory()) once we start using the iterator.  Currently, it
+        #       looks like _get_paths() never forces a cache refresh so if we expect
+        #       additional directories to be added later, it is buggy.
         for path in (p for p in self._get_paths() if p not in self._searched_paths and os.path.isdir(p)):
             try:
                 full_paths = (os.path.join(path, f) for f in os.listdir(path))
@@ -302,6 +303,16 @@ class PluginLoader:
 
     __contains__ = has_plugin
 
+    def _load_module_source(self, name, path):
+        if name in sys.modules:
+            # See https://github.com/ansible/ansible/issues/13110
+            return sys.modules[name]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            with open(path, 'r') as module_file:
+                module = imp.load_source(name, path, module_file)
+        return module
+
     def get(self, name, *args, **kwargs):
         ''' instantiates a plugin of the given name using arguments '''
 
@@ -312,7 +323,7 @@ class PluginLoader:
             return None
 
         if path not in self._module_cache:
-            self._module_cache[path] = imp.load_source('.'.join([self.package, name]), path)
+            self._module_cache[path] = self._load_module_source('.'.join([self.package, name]), path)
 
         if kwargs.get('class_only', False):
             obj = getattr(self._module_cache[path], self.class_name)
@@ -330,12 +341,12 @@ class PluginLoader:
             matches = glob.glob(os.path.join(i, "*.py"))
             matches.sort()
             for path in matches:
-                name, ext = os.path.splitext(os.path.basename(path))
-                if name.startswith("_"):
+                name, _ = os.path.splitext(path)
+                if '__init__' in name:
                     continue
 
                 if path not in self._module_cache:
-                    self._module_cache[path] = imp.load_source('.'.join([self.package, name]), path)
+                    self._module_cache[path] = self._load_module_source(name, path)
 
                 if kwargs.get('class_only', False):
                     obj = getattr(self._module_cache[path], self.class_name)

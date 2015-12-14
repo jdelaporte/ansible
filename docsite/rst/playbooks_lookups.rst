@@ -10,6 +10,8 @@ in Ansible, and are typically used to load variables or templates with informati
 
 .. note:: Lookups occur on the local computer, not on the remote computer.
 
+.. note:: Lookups are executed with a cwd relative to the role or play, as opposed to local tasks which are executed with the cwd of the executed script.
+
 .. note:: Since 1.9 you can pass wantlist=True to lookups to use in jinja2 template "for" loops.
 
 .. contents:: Topics
@@ -270,6 +272,10 @@ Here are some examples::
          - debug: msg="{{ lookup('dnstxt', 'example.com') }} is a DNS TXT record for example.com"
 
          - debug: msg="{{ lookup('template', './some_template.j2') }} is a value from evaluation of this template"
+
+         # loading a json file from a template as a string
+         - debug: msg="{{ lookup('template', './some_json.json.j2', convert_data=False) }} is a value from evaluation of this template"
+
 
          - debug: msg="{{ lookup('etcd', 'foo') }} is a value from a locally running etcd"
 

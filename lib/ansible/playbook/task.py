@@ -19,17 +19,16 @@
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
-from six import iteritems, string_types
+from ansible.compat.six import iteritems, string_types
 
 from ansible.errors import AnsibleError
 
 from ansible.parsing.mod_args import ModuleArgsParser
-from ansible.parsing.splitter import parse_kv
 from ansible.parsing.yaml.objects import AnsibleBaseYAMLObject, AnsibleMapping, AnsibleUnicode
 
-from ansible.plugins import module_loader, lookup_loader
+from ansible.plugins import lookup_loader
 
-from ansible.playbook.attribute import Attribute, FieldAttribute
+from ansible.playbook.attribute import FieldAttribute
 from ansible.playbook.base import Base
 from ansible.playbook.become import Become
 from ansible.playbook.block import Block
@@ -37,14 +36,14 @@ from ansible.playbook.conditional import Conditional
 from ansible.playbook.role import Role
 from ansible.playbook.taggable import Taggable
 
-__all__ = ['Task']
-
 try:
     from __main__ import display
-    display = display
 except ImportError:
     from ansible.utils.display import Display
     display = Display()
+
+__all__ = ['Task']
+
 
 class Task(Base, Conditional, Taggable, Become):
 
@@ -68,25 +67,22 @@ class Task(Base, Conditional, Taggable, Become):
     _args                 = FieldAttribute(isa='dict', default=dict())
     _action               = FieldAttribute(isa='string')
 
-    _always_run           = FieldAttribute(isa='bool')
     _any_errors_fatal     = FieldAttribute(isa='bool')
     _async                = FieldAttribute(isa='int', default=0)
     _changed_when         = FieldAttribute(isa='string')
     _delay                = FieldAttribute(isa='int', default=5)
     _delegate_to          = FieldAttribute(isa='string')
+    _delegate_facts       = FieldAttribute(isa='bool', default=False)
     _failed_when          = FieldAttribute(isa='string')
     _first_available_file = FieldAttribute(isa='list')
-    _ignore_errors        = FieldAttribute(isa='bool')
     _loop                 = FieldAttribute(isa='string', private=True)
     _loop_args            = FieldAttribute(isa='list', private=True)
-    _local_action         = FieldAttribute(isa='string')
     _name                 = FieldAttribute(isa='string', default='')
     _notify               = FieldAttribute(isa='list')
     _poll                 = FieldAttribute(isa='int')
     _register             = FieldAttribute(isa='string')
-    _retries              = FieldAttribute(isa='int', default=1)
-    _run_once             = FieldAttribute(isa='bool')
-    _until                = FieldAttribute(isa='list') # ?
+    _retries              = FieldAttribute(isa='int', default=3)
+    _until                = FieldAttribute(isa='list')
 
     def __init__(self, block=None, role=None, task_include=None):
         ''' constructors a task, without the Task.load classmethod, it will be pretty blank '''
@@ -98,24 +94,24 @@ class Task(Base, Conditional, Taggable, Become):
         super(Task, self).__init__()
 
     def get_path(self):
-       ''' return the absolute path of the task with its line number '''
+        ''' return the absolute path of the task with its line number '''
 
-       if hasattr(self, '_ds'):
-           return "%s:%s" % (self._ds._data_source, self._ds._line_number)
+        if hasattr(self, '_ds'):
+            return "%s:%s" % (self._ds._data_source, self._ds._line_number)
 
     def get_name(self):
-       ''' return the name of the task '''
+        ''' return the name of the task '''
 
-       if self._role and self.name:
-           return "%s : %s" % (self._role.get_name(), self.name)
-       elif self.name:
-           return self.name
-       else:
-           flattened_args = self._merge_kv(self.args)
-           if self._role:
-               return "%s : %s %s" % (self._role.get_name(), self.action, flattened_args)
-           else:
-               return "%s %s" % (self.action, flattened_args)
+        if self._role and self.name:
+            return "%s : %s" % (self._role.get_name(), self.name)
+        elif self.name:
+            return self.name
+        else:
+            flattened_args = self._merge_kv(self.args)
+            if self._role:
+                return "%s : %s %s" % (self._role.get_name(), self.action, flattened_args)
+            else:
+                return "%s %s" % (self.action, flattened_args)
 
     def _merge_kv(self, ds):
         if ds is None:
@@ -138,7 +134,10 @@ class Task(Base, Conditional, Taggable, Become):
 
     def __repr__(self):
         ''' returns a human readable representation of the task '''
-        return "TASK: %s" % self.get_name()
+        if self.get_name() == 'meta ':
+            return "TASK: meta (%s)" % self.args['_raw_params']
+        else:
+            return "TASK: %s" % self.get_name()
 
     def _preprocess_loop(self, ds, new_ds, k, v):
         ''' take a lookup plugin name and store it correctly '''
@@ -172,6 +171,16 @@ class Task(Base, Conditional, Taggable, Become):
         args_parser = ModuleArgsParser(task_ds=ds)
         (action, args, delegate_to) = args_parser.parse()
 
+        # the command/shell/script modules used to support the `cmd` arg,
+        # which corresponds to what we now call _raw_params, so move that
+        # value over to _raw_params (assuming it is empty)
+        if action in ('command', 'shell', 'script'):
+            if 'cmd' in args:
+                if args.get('_raw_params', '') != '':
+                    raise AnsibleError("The 'cmd' argument cannot be used when other raw parameters are specified."
+                            " Please put everything in one or the other place.", obj=ds)
+                args['_raw_params'] = args.pop('cmd')
+
         new_ds['action']      = action
         new_ds['args']        = args
         new_ds['delegate_to'] = delegate_to
@@ -186,7 +195,7 @@ class Task(Base, Conditional, Taggable, Become):
         else:
             new_ds['vars'] = dict()
 
-        for (k,v) in ds.iteritems():
+        for (k,v) in iteritems(ds):
             if k in ('action', 'local_action', 'args', 'delegate_to') or k == action or k == 'shell':
                 # we don't want to re-assign these values, which were
                 # determined by the ModuleArgsParser() above
@@ -199,7 +208,9 @@ class Task(Base, Conditional, Taggable, Become):
                 # here, and show a deprecation message as we will remove this at
                 # some point in the future.
                 if action == 'include' and k not in self._get_base_attributes() and k not in self.DEPRECATED_ATTRIBUTES:
-                    self._display.deprecated("Specifying include variables at the top-level of the task is deprecated. Please see:\nhttp://docs.ansible.com/ansible/playbooks_roles.html#task-include-files-and-encouraging-reuse\n\nfor currently supported syntax regarding included files and variables")
+                    display.deprecated("Specifying include variables at the top-level of the task is deprecated."
+                            " Please see:\nhttp://docs.ansible.com/ansible/playbooks_roles.html#task-include-files-and-encouraging-reuse\n\n"
+                            " for currently supported syntax regarding included files and variables")
                     new_ds['vars'][k] = v
                 else:
                     new_ds[k] = v
@@ -244,7 +255,8 @@ class Task(Base, Conditional, Taggable, Become):
 
         for env_item in value:
             if isinstance(env_item, (string_types, AnsibleUnicode)) and env_item in templar._available_variables.keys():
-                self._display.deprecated("Using bare variables for environment is deprecated. Update your playbooks so that the environment value uses the full variable syntax ('{{foo}}')")
+                display.deprecated("Using bare variables for environment is deprecated."
+                        " Update your playbooks so that the environment value uses the full variable syntax ('{{foo}}')")
                 break
         return templar.template(value, convert_bare=True)
 
@@ -262,6 +274,14 @@ class Task(Base, Conditional, Taggable, Become):
         if 'when' in all_vars:
             del all_vars['when']
 
+        return all_vars
+
+    def get_include_params(self):
+        all_vars = dict()
+        if self._task_include:
+            all_vars.update(self._task_include.get_include_params())
+        if self.action == 'include':
+            all_vars.update(self.vars)
         return all_vars
 
     def copy(self, exclude_block=False):
@@ -378,8 +398,7 @@ class Task(Base, Conditional, Taggable, Become):
         Override for the 'tags' getattr fetcher, used from Base.
         '''
         environment = self._attributes['environment']
-        if environment is None:
-            environment = self._get_parent_attribute('environment')
-
+        parent_environment = self._get_parent_attribute('environment', extend=True)
+        if parent_environment is not None:
+            environment = self._extend_value(environment, parent_environment)
         return environment
-

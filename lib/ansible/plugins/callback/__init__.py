@@ -16,7 +16,7 @@
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 
 # Make coding more python3-ish
-from __future__ import (absolute_import, division)
+from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
 import json
@@ -24,10 +24,17 @@ import difflib
 import warnings
 from copy import deepcopy
 
-from six import string_types
+from ansible.compat.six import string_types
 
 from ansible import constants as C
+from ansible.vars import strip_internal_keys
 from ansible.utils.unicode import to_unicode
+
+try:
+    from __main__ import display as global_display
+except ImportError:
+    from ansible.utils.display import Display
+    global_display = Display()
 
 __all__ = ["CallbackBase"]
 
@@ -40,19 +47,23 @@ class CallbackBase:
     custom actions.
     '''
 
-    # FIXME: the list of functions here needs to be updated once we have
-    #        finalized the list of callback methods used in the default callback
+    def __init__(self, display=None):
+        if display:
+            self._display = display
+        else:
+            self._display = global_display
 
-    def __init__(self, display):
-        self._display = display
         if self._display.verbosity >= 4:
             name = getattr(self, 'CALLBACK_NAME', 'unnamed')
             ctype = getattr(self, 'CALLBACK_TYPE', 'old')
             version = getattr(self, 'CALLBACK_VERSION', '1.0')
             self._display.vvvv('Loaded callback %s of type %s, v%s' % (name, ctype, version))
 
-    def _dump_results(self, result, indent=None, sort_keys=True):
+    def _copy_result(self, result):
+        ''' helper for callbacks, so they don't all have to include deepcopy '''
+        return deepcopy(result)
 
+    def _dump_results(self, result, indent=None, sort_keys=True, keep_invocation=False):
         if result.get('_ansible_no_log', False):
             return json.dumps(dict(censored="the output has been hidden due to the fact that 'no_log: true' was specified for this result"))
 
@@ -60,11 +71,13 @@ class CallbackBase:
             indent = 4
 
         # All result keys stating with _ansible_ are internal, so remove them from the result before we output anything.
-        for k in result.keys():
-            if isinstance(k, string_types) and k.startswith('_ansible_'):
-                del result[k]
+        abridged_result = strip_internal_keys(result)
 
-        return json.dumps(result, indent=indent, ensure_ascii=False, sort_keys=sort_keys)
+        # remove invocation unless specifically wanting it
+        if not keep_invocation and self._display.verbosity < 3 and 'invocation' in result:
+            del abridged_result['invocation']
+
+        return json.dumps(abridged_result, indent=indent, ensure_ascii=False, sort_keys=sort_keys)
 
     def _handle_warnings(self, res):
         ''' display warnings, if enabled and any exist in the result '''
@@ -108,7 +121,7 @@ class CallbackBase:
                 ret.append(">> the files are different, but the diff library cannot compare unicode strings\n\n")
 
     def _get_item(self, result):
-        if '_ansible_no_log' in result and result['_ansible_no_log']:
+        if result.get('_ansible_no_log', False):
             item = "(censored due to no_log)"
         else:
             item = result.get('item', None)
@@ -117,7 +130,7 @@ class CallbackBase:
 
     def _process_items(self, result):
         for res in result._result['results']:
-            newres = deepcopy(result)
+            newres = self._copy_result(result)
             res['item'] = self._get_item(res)
             newres._result = res
             if 'failed' in res and res['failed']:
@@ -220,7 +233,7 @@ class CallbackBase:
     def v2_runner_on_async_poll(self, result):
         host = result._host.get_name()
         jid = result._result.get('ansible_job_id')
-         #FIXME, get real clock
+        #FIXME, get real clock
         clock = 0
         self.runner_on_async_poll(host, result._result, jid, clock)
 
@@ -237,7 +250,7 @@ class CallbackBase:
     def v2_runner_on_file_diff(self, result, diff):
         pass #no v1 correspondance
 
-    def v2_playbook_on_start(self):
+    def v2_playbook_on_start(self, playbook):
         self.playbook_on_start()
 
     def v2_playbook_on_notify(self, result, handler):
@@ -292,3 +305,15 @@ class CallbackBase:
 
     def v2_playbook_on_item_skipped(self, result):
         pass # no v1
+
+    def v2_playbook_on_include(self, included_file):
+        pass #no v1 correspondance
+
+    def v2_playbook_item_on_ok(self, result):
+        pass
+
+    def v2_playbook_item_on_failed(self, result):
+        pass
+
+    def v2_playbook_item_on_skipped(self, result):
+        pass

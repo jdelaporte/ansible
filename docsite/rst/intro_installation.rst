@@ -52,7 +52,7 @@ This includes Red Hat, Debian, CentOS, OS X, any of the BSDs, and so on.
 
 .. note::
 
-    As of 2.0 ansible uses a few more file handles to manage it's forks, OS X has a very low setting so if you want to use 15 or more forks
+    As of 2.0 ansible uses a few more file handles to manage its forks, OS X has a very low setting so if you want to use 15 or more forks
     you'll need to raise the ulimit, like so ``sudo launchctl limit maxfiles 1024 2048``. Or just any time you see a "Too many open files" error.
 
 
@@ -89,8 +89,12 @@ Also you need Python 2.4 or later, but if you are running less than Python 2.5 o
    the 'ansible_python_interpreter' variable in inventory (see :doc:`intro_inventory`) to point at your 2.X Python.  Distributions
    like Red Hat Enterprise Linux, CentOS, Fedora, and Ubuntu all have a 2.X interpreter installed
    by default and this does not apply to those distributions.  This is also true of nearly all
-   Unix systems.  If you need to bootstrap these remote systems by installing Python 2.X, 
-   using the 'raw' module will be able to do it remotely.
+   Unix systems.
+
+   If you need to bootstrap these remote systems by installing Python 2.X,
+   using the 'raw' module will be able to do it remotely. For example,
+   ``ansible myhost --sudo -m raw -a "yum install -y python2 python-simplejson"``
+   would install Python 2.X and the simplejson module needed to run ansible and its modules.
 
 .. _installing_the_control_machine:
 

@@ -19,9 +19,9 @@
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
-from six import iteritems, string_types
+from ansible.compat.six import iteritems, string_types
 
-from ansible.errors import AnsibleParserError
+from ansible.errors import AnsibleParserError,AnsibleError
 from ansible.plugins import module_loader
 from ansible.parsing.splitter import parse_kv, split_args
 from ansible.template import Templar
@@ -155,6 +155,13 @@ class ModuleArgsParser:
                     tmp_args = parse_kv(tmp_args)
                 args.update(tmp_args)
 
+        # only internal variables can start with an underscore, so
+        # we don't allow users to set them directy in arguments
+        if args and action not in ('command', 'shell', 'script', 'raw'):
+            for arg in args:
+                if arg.startswith('_ansible_'):
+                    raise AnsibleError("invalid parameter specified for action '%s': '%s'" % (action, arg))
+
         # finally, update the args we're going to return with the ones
         # which were normalized above
         if args:
@@ -243,7 +250,6 @@ class ModuleArgsParser:
         # this is the 'extra gross' scenario detailed above, so we grab
         # the args and pass them in as additional arguments, which can/will
         # be overwritten via dict updates from the other arg sources below
-        # FIXME: add test cases for this
         additional_args = self._task_ds.get('args', dict())
 
         # We can have one of action, local_action, or module specified

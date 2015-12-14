@@ -1,3 +1,7 @@
+# Make coding more python3-ish
+from __future__ import (absolute_import, division, print_function)
+__metaclass__ = type
+
 import os
 import json
 
@@ -22,10 +26,11 @@ class CallbackModule(CallbackBase):
     CALLBACK_VERSION = 2.0
     CALLBACK_TYPE = 'aggregate'
     CALLBACK_NAME = 'syslog_json'
+    CALLBACK_NEEDS_WHITELIST = True
 
-    def __init__(self, display):
+    def __init__(self):
 
-        super(CallbackModule, self).__init__(display)
+        super(CallbackModule, self).__init__()
 
         self.logger =  logging.getLogger('ansible logger')
         self.logger.setLevel(logging.DEBUG)

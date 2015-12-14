@@ -44,7 +44,7 @@ GIT_HASH := $(shell git log -n 1 --format="%h")
 GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD | sed 's/[-_.\/]//g')
 GITINFO = .$(GIT_HASH).$(GIT_BRANCH)
 else
-GITINFO = ''
+GITINFO = ""
 endif
 
 ifeq ($(shell echo $(OS) | egrep -c 'Darwin|FreeBSD|OpenBSD'),1)
@@ -58,7 +58,7 @@ DEBUILD_BIN ?= debuild
 DEBUILD_OPTS = --source-option="-I"
 DPUT_BIN ?= dput
 DPUT_OPTS ?=
-DEB_DATE := $(shell date +"%a, %d %b %Y %T %z")
+DEB_DATE := $(shell LC_TIME=C date +"%a, %d %b %Y %T %z")
 ifeq ($(OFFICIAL),yes)
     DEB_RELEASE = $(RELEASE)ppa
     # Sign OFFICIAL builds using 'DEBSIGN_KEYID'
@@ -93,7 +93,7 @@ MOCK_CFG ?=
 
 NOSETESTS ?= nosetests
 
-NOSETESTS3 ?= nosetests-3.3
+NOSETESTS3 ?= nosetests-3.4
 
 ########################################################
 
@@ -102,11 +102,8 @@ all: clean python
 tests:
 	PYTHONPATH=./lib $(NOSETESTS) -d -w test/units -v --with-coverage --cover-package=ansible --cover-branches
 
-newtests:
-	PYTHONPATH=./v2:./lib $(NOSETESTS) -d -w v2/test -v --with-coverage --cover-package=ansible --cover-branches
-
-newtests-py3:
-	PYTHONPATH=./v2:./lib $(NOSETESTS3) -d -w v2/test -v --with-coverage --cover-package=ansible --cover-branches
+tests-py3:
+	PYTHONPATH=./lib $(NOSETESTS3) -d -w test/units -v --with-coverage --cover-package=ansible --cover-branches
 
 authors:
 	sh hacking/authors.sh
@@ -142,7 +139,7 @@ clean:
 	@echo "Cleaning up byte compiled python stuff"
 	find . -type f -regex ".*\.py[co]$$" -delete
 	@echo "Cleaning up editor backup files"
-	find . -type f  \( -name "*~" -or -name "#*" \) |grep -v test/units/inventory_test_data/group_vars/noparse/all.yml~ |xargs -n 1024 -r rm
+	find . -type f -not -path ./test/units/inventory_test_data/group_vars/noparse/all.yml~ \( -name "*~" -or -name "#*" \) -delete
 	find . -type f \( -name "*.swp" \) -delete
 	@echo "Cleaning up manpage stuff"
 	find ./docs/man -type f -name "*.xml" -delete

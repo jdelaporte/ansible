@@ -19,13 +19,11 @@
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
-from six.moves import queue
-from six import iteritems, text_type
+from ansible.compat.six.moves import queue
+from ansible.compat.six import iteritems, text_type
+from ansible.vars import strip_internal_keys
 
 import multiprocessing
-import os
-import signal
-import sys
 import time
 import traceback
 
@@ -36,9 +34,6 @@ try:
     from Crypto.Random import atfork
 except ImportError:
     HAS_ATFORK=False
-
-from ansible.playbook.handler import Handler
-from ansible.playbook.task import Task
 
 from ansible.utils.debug import debug
 
@@ -63,7 +58,7 @@ class ResultProcess(multiprocessing.Process):
 
     def _send_result(self, result):
         debug(u"sending result: %s" % ([text_type(x) for x in result],))
-        self._final_q.put(result, block=False)
+        self._final_q.put(result)
         debug("done sending result")
 
     def _read_worker_result(self):
@@ -106,19 +101,23 @@ class ResultProcess(multiprocessing.Process):
             try:
                 result = self._read_worker_result()
                 if result is None:
-                    time.sleep(0.01)
+                    time.sleep(0.0001)
                     continue
+
+                clean_copy = strip_internal_keys(result._result)
+                if 'invocation' in clean_copy:
+                    del clean_copy['invocation']
 
                 # if this task is registering a result, do it now
                 if result._task.register:
-                    self._send_result(('register_host_var', result._host, result._task.register, result._result))
+                    self._send_result(('register_host_var', result._host, result._task, clean_copy))
 
                 # send callbacks, execute other options based on the result status
-                # FIXME: this should all be cleaned up and probably moved to a sub-function.
-                #        the fact that this sometimes sends a TaskResult and other times
-                #        sends a raw dictionary back may be confusing, but the result vs.
-                #        results implementation for tasks with loops should be cleaned up
-                #        better than this
+                # TODO: this should all be cleaned up and probably moved to a sub-function.
+                #       the fact that this sometimes sends a TaskResult and other times
+                #       sends a raw dictionary back may be confusing, but the result vs.
+                #       results implementation for tasks with loops should be cleaned up
+                #       better than this
                 if result.is_unreachable():
                     self._send_result(('host_unreachable', result))
                 elif result.is_failed():
@@ -143,15 +142,13 @@ class ResultProcess(multiprocessing.Process):
                                 # notifies all other threads
                                 for notify in result_item['_ansible_notify']:
                                     self._send_result(('notify_handler', result, notify))
-                            # now remove the notify field from the results, as its no longer needed
-                            result_item.pop('_ansible_notify')
 
                         if 'add_host' in result_item:
                             # this task added a new host (add_host module)
                             self._send_result(('add_host', result_item))
                         elif 'add_group' in result_item:
                             # this task added a new group (group_by module)
-                            self._send_result(('add_group', result._task))
+                            self._send_result(('add_group', result._host, result_item))
                         elif 'ansible_facts' in result_item:
                             # if this task is registering facts, do that now
                             item = result_item.get('item', None)
@@ -169,8 +166,8 @@ class ResultProcess(multiprocessing.Process):
             except (KeyboardInterrupt, IOError, EOFError):
                 break
             except:
-                # FIXME: we should probably send a proper callback here instead of
-                #        simply dumping a stack trace on the screen
+                # TODO: we should probably send a proper callback here instead of
+                #       simply dumping a stack trace on the screen
                 traceback.print_exc()
                 break
 

@@ -140,7 +140,7 @@ def list_modules(module_dir, depth=0):
             if os.path.isdir(d):
 
                 res = list_modules(d, depth + 1)
-                for key in res.keys():
+                for key in list(res.keys()):
                     if key in categories:
                         categories[key] = merge_hash(categories[key], res[key])
                         res.pop(key, None)
@@ -173,6 +173,10 @@ def list_modules(module_dir, depth=0):
                     categories[category] = {}
                 categories[category][module] = d
                 categories['all'][module] = d
+
+    # keep module tests out of becomeing module docs
+    if 'test' in categories:
+        del categories['test']
 
     return categories
 
@@ -308,7 +312,11 @@ def process_module(module, options, env, template, outputname, module_map, alias
     doc['ansible_version']  = options.ansible_version
     doc['plainexamples']    = examples  #plain text
     if returndocs:
-        doc['returndocs']       = yaml.safe_load(returndocs)
+        try:
+            doc['returndocs']       = yaml.safe_load(returndocs)
+        except:
+            print("could not load yaml: %s" % returndocs)
+            raise
     else:
         doc['returndocs']       = None
 
@@ -443,7 +451,7 @@ def main():
 
     categories = list_modules(options.module_dir)
     last_category = None
-    category_names = categories.keys()
+    category_names = list(categories.keys())
     category_names.sort()
 
     category_list_path = os.path.join(options.output_dir, "modules_by_category.rst")

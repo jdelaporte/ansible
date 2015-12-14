@@ -20,7 +20,7 @@ __metaclass__ = type
 
 from abc import ABCMeta, abstractmethod
 
-from six import with_metaclass
+from ansible.compat.six import with_metaclass
 
 try:
     from __main__ import display
@@ -31,6 +31,7 @@ except ImportError:
 
 class BaseCacheModule(with_metaclass(ABCMeta, object)):
 
+    # Backwards compat only.  Just import the global display instead
     _display = display
 
     @abstractmethod

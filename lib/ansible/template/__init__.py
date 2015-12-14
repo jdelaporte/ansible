@@ -24,7 +24,7 @@ import contextlib
 import os
 import re
 
-from six import string_types, text_type, binary_type, StringIO
+from ansible.compat.six import string_types, text_type, binary_type, StringIO
 from jinja2 import Environment
 from jinja2.loaders import FileSystemLoader
 from jinja2.exceptions import TemplateSyntaxError, UndefinedError
@@ -38,6 +38,11 @@ from ansible.template.safe_eval import safe_eval
 from ansible.template.template import AnsibleJ2Template
 from ansible.template.vars import AnsibleJ2Vars
 from ansible.utils.debug import debug
+
+try:
+    from hashlib import sha1
+except ImportError:
+    from sha import sha as sha1
 
 from numbers import Number
 
@@ -122,6 +127,7 @@ class Templar:
         self._filters             = None
         self._tests               = None
         self._available_variables = variables
+        self._cached_result       = {}
 
         if loader:
             self._basedir = loader.get_basedir()
@@ -130,9 +136,11 @@ class Templar:
 
         if shared_loader_obj:
             self._filter_loader = getattr(shared_loader_obj, 'filter_loader')
+            self._test_loader   = getattr(shared_loader_obj, 'test_loader')
             self._lookup_loader = getattr(shared_loader_obj, 'lookup_loader')
         else:
             self._filter_loader = filter_loader
+            self._test_loader   = test_loader
             self._lookup_loader = lookup_loader
 
         # flags to determine whether certain failures during templating
@@ -156,7 +164,8 @@ class Templar:
         self.block_end      = self.environment.block_end_string
         self.variable_start = self.environment.variable_start_string
         self.variable_end   = self.environment.variable_end_string
-        self._clean_regex   = re.compile(r'(?:%s[%s%s]|[%s%s]%s)' % (self.variable_start[0], self.variable_start[1], self.block_start[1], self.block_end[0], self.variable_end[0], self.variable_end[1]))
+        self._clean_regex   = re.compile(r'(?:%s|%s|%s|%s)' % (self.variable_start, self.block_start, self.block_end, self.variable_end))
+        self._no_type_regex = re.compile(r'.*\|(?:%s)\s*(?:%s)?$' % ('|'.join(C.STRING_TYPE_FILTERS), self.variable_end))
 
     def _get_filters(self):
         '''
@@ -183,7 +192,7 @@ class Templar:
         if self._tests is not None:
             return self._tests.copy()
 
-        plugins = [x for x in test_loader.all()]
+        plugins = [x for x in self._test_loader.all()]
 
         self._tests = dict()
         for fp in plugins:
@@ -230,18 +239,18 @@ class Templar:
 
                 elif token[1] == self.variable_end[1]:
                     prev_idx = None
-                    if token == '%}' and block_openings:
+                    if token == self.block_end and block_openings:
                         prev_idx = block_openings.pop()
-                    elif token == '}}' and print_openings:
+                    elif token == self.variable_end and print_openings:
                         prev_idx = print_openings.pop()
 
                     if prev_idx is not None:
                         # replace the opening
                         data.seek(prev_idx, os.SEEK_SET)
-                        data.write('{#')
+                        data.write(self.environment.comment_start_string)
                         # replace the closing
                         data.seek(token_start, os.SEEK_SET)
-                        data.write('#}')
+                        data.write(self.environment.comment_end_string)
 
                 else:
                     raise AnsibleError("Error while cleaning data for safety: unhandled regex match")
@@ -252,21 +261,25 @@ class Templar:
         '''
         Sets the list of template variables this Templar instance will use
         to template things, so we don't have to pass them around between
-        internal methods.
+        internal methods. We also clear the template cache here, as the variables
+        are being changed.
         '''
 
         assert isinstance(variables, dict)
-        self._available_variables = variables.copy()
+        self._available_variables = variables
+        self._cached_result       = {}
 
-    def template(self, variable, convert_bare=False, preserve_trailing_newlines=True, escape_backslashes=True, fail_on_undefined=None, overrides=None, convert_data=True):
+    def template(self, variable, convert_bare=False, preserve_trailing_newlines=True, escape_backslashes=True, fail_on_undefined=None, overrides=None, convert_data=True, static_vars = [''], cache = True):
         '''
         Templates (possibly recursively) any given data as input. If convert_bare is
         set to True, the given data will be wrapped as a jinja2 variable ('{{foo}}')
         before being sent through the template engine. 
         '''
 
-        # Don't template unsafe variables, instead drop them back down to
-        # their constituent type.
+        if fail_on_undefined is None:
+            fail_on_undefined = self._fail_on_undefined_errors
+
+        # Don't template unsafe variables, instead drop them back down to their constituent type.
         if hasattr(variable, '__UNSAFE__'):
             if isinstance(variable, text_type):
                 return self._clean_data(text_type(variable))
@@ -281,6 +294,7 @@ class Templar:
 
             if isinstance(variable, string_types):
                 result = variable
+
                 if self._contains_vars(variable):
 
                     # Check to see if the string we are trying to render is just referencing a single
@@ -296,20 +310,33 @@ class Templar:
                             elif resolved_val is None:
                                 return C.DEFAULT_NULL_REPRESENTATION
 
-                    result = self._do_template(variable, preserve_trailing_newlines=preserve_trailing_newlines, escape_backslashes=escape_backslashes, fail_on_undefined=fail_on_undefined, overrides=overrides)
+                    # Using a cache in order to prevent template calls with already templated variables
+                    sha1_hash = None
+                    if cache:
+                        variable_hash = sha1(text_type(variable).encode('utf-8'))
+                        options_hash  = sha1((text_type(preserve_trailing_newlines) + text_type(escape_backslashes) + text_type(fail_on_undefined) + text_type(overrides)).encode('utf-8'))
+                        sha1_hash = variable_hash.hexdigest() + options_hash.hexdigest()
+                    if cache and sha1_hash in self._cached_result:
+                        result = self._cached_result[sha1_hash]
+                    else:
+                        result = self._do_template(variable, preserve_trailing_newlines=preserve_trailing_newlines, escape_backslashes=escape_backslashes, fail_on_undefined=fail_on_undefined, overrides=overrides)
+                        if convert_data and not self._no_type_regex.match(variable):
+                            # if this looks like a dictionary or list, convert it to such using the safe_eval method
+                            if (result.startswith("{") and not result.startswith(self.environment.variable_start_string)) or \
+                              result.startswith("[") or result in ("True", "False"):
+                                eval_results = safe_eval(result, locals=self._available_variables, include_exceptions=True)
+                                if eval_results[1] is None:
+                                    result = eval_results[0]
+                                else:
+                                    # FIXME: if the safe_eval raised an error, should we do something with it?
+                                    pass
 
-                    if convert_data:
-                        # if this looks like a dictionary or list, convert it to such using the safe_eval method
-                        if (result.startswith("{") and not result.startswith(self.environment.variable_start_string)) or \
-                           result.startswith("[") or result in ("True", "False"):
-                            eval_results = safe_eval(result, locals=self._available_variables, include_exceptions=True)
-                            if eval_results[1] is None:
-                                result = eval_results[0]
-                            else:
-                                # FIXME: if the safe_eval raised an error, should we do something with it?
-                                pass
+                        # we only cache in the case where we have a single variable
+                        # name, to make sure we're not putting things which may otherwise
+                        # be dynamic in the cache (filters, lookups, etc.)
+                        if cache:
+                            self._cached_result[sha1_hash] = result
 
-                #return self._clean_data(result)
                 return result
 
             elif isinstance(variable, (list, tuple)):
@@ -319,7 +346,10 @@ class Templar:
                 # we don't use iteritems() here to avoid problems if the underlying dict
                 # changes sizes due to the templating, which can happen with hostvars
                 for k in variable.keys():
-                    d[k] = self.template(variable[k], preserve_trailing_newlines=preserve_trailing_newlines, fail_on_undefined=fail_on_undefined, overrides=overrides)
+                    if k not in static_vars:
+                        d[k] = self.template(variable[k], preserve_trailing_newlines=preserve_trailing_newlines, fail_on_undefined=fail_on_undefined, overrides=overrides)
+                    else:
+                        d[k] = variable[k]
                 return d
             else:
                 return variable
@@ -362,6 +392,8 @@ class Templar:
         instance = self._lookup_loader.get(name.lower(), loader=self._loader, templar=self)
 
         if instance is not None:
+            wantlist = kwargs.pop('wantlist', False)
+
             from ansible.utils.listify import listify_lookup_plugin_terms
             loop_terms = listify_lookup_plugin_terms(terms=args, templar=self, loader=self._loader, fail_on_undefined=True, convert_bare=False)
             # safely catch run failures per #5059
@@ -375,8 +407,11 @@ class Templar:
                 ran = None
 
             if ran:
-                from ansible.vars.unsafe_proxy import UnsafeProxy
-                ran = UnsafeProxy(",".join(ran))
+                from ansible.vars.unsafe_proxy import UnsafeProxy, wrap_var
+                if wantlist:
+                    ran = wrap_var(ran)
+                else:
+                    ran = UnsafeProxy(",".join(ran))
 
             return ran
         else:

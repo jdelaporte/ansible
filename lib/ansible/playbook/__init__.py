@@ -21,9 +21,7 @@ __metaclass__ = type
 
 import os
 
-from ansible.errors import AnsibleError, AnsibleParserError
-from ansible.parsing import DataLoader
-from ansible.playbook.attribute import Attribute, FieldAttribute
+from ansible.errors import AnsibleParserError
 from ansible.playbook.play import Play
 from ansible.playbook.playbook_include import PlaybookInclude
 from ansible.plugins import get_all_plugin_loaders
@@ -46,6 +44,7 @@ class Playbook:
         self._entries = []
         self._basedir = os.getcwd()
         self._loader  = loader
+        self._file_name = None
 
     @staticmethod
     def load(file_name, variable_manager=None, loader=None):
@@ -62,6 +61,8 @@ class Playbook:
 
         # set the loaders basedir
         self._loader.set_basedir(self._basedir)
+
+        self._file_name = file_name
 
         # dynamically load any plugins from the playbook directory
         for name, obj in get_all_plugin_loaders():
