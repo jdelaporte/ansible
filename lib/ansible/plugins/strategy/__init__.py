@@ -39,7 +39,9 @@ from ansible.playbook.helpers import load_list_of_blocks
 from ansible.playbook.included_file import IncludedFile
 from ansible.plugins import action_loader, connection_loader, filter_loader, lookup_loader, module_loader, test_loader
 from ansible.template import Templar
+from ansible.utils.unicode import to_unicode
 from ansible.vars.unsafe_proxy import wrap_var
+from ansible.vars import combine_vars
 
 try:
     from __main__ import display
@@ -185,10 +187,20 @@ class StrategyBase:
                 result = self._final_q.get()
                 display.debug("got result from result worker: %s" % ([text_type(x) for x in result],))
 
+                # helper method, used to find the original host from the one
+                # returned in the result/message, which has been serialized and
+                # thus had some information stripped from it to speed up the
+                # serialization process
+                def get_original_host(host):
+                    if host.name in self._inventory._hosts_cache:
+                       return self._inventory._hosts_cache[host.name]
+                    else:
+                       return self._inventory.get_host(host.name)
+
                 # all host status messages contain 2 entries: (msg, task_result)
                 if result[0] in ('host_task_ok', 'host_task_failed', 'host_task_skipped', 'host_unreachable'):
                     task_result = result[1]
-                    host = task_result._host
+                    host = get_original_host(task_result._host)
                     task = task_result._task
                     if result[0] == 'host_task_failed' or task_result.is_failed():
                         if not task.ignore_errors:
@@ -198,8 +210,10 @@ class StrategyBase:
                                 [iterator.mark_host_failed(h) for h in self._inventory.get_hosts(iterator._play.hosts) if h.name not in self._tqm._unreachable_hosts]
                             else:
                                 iterator.mark_host_failed(host)
-                            (state, tmp_task) = iterator.get_next_task_for_host(host, peek=True)
-                            if not state or state.run_state != PlayIterator.ITERATING_RESCUE:
+
+                            # only add the host to the failed list officially if it has
+                            # been failed by the iterator
+                            if iterator.is_failed(host):
                                 self._tqm._failed_hosts[host.name] = True
                                 self._tqm._stats.increment('failures', host.name)
                         else:
@@ -244,7 +258,7 @@ class StrategyBase:
                     self._add_host(new_host_info, iterator)
 
                 elif result[0] == 'add_group':
-                    host = result[1]
+                    host = get_original_host(result[1])
                     result_item = result[2]
                     self._add_group(host, result_item)
 
@@ -252,19 +266,20 @@ class StrategyBase:
                     task_result  = result[1]
                     handler_name = result[2]
 
-                    original_task = iterator.get_original_task(task_result._host, task_result._task)
+                    original_host = get_original_host(task_result._host)
+                    original_task = iterator.get_original_task(original_host, task_result._task)
                     if handler_name not in self._notified_handlers:
                         self._notified_handlers[handler_name] = []
 
-                    if task_result._host not in self._notified_handlers[handler_name]:
-                        self._notified_handlers[handler_name].append(task_result._host)
+                    if original_host not in self._notified_handlers[handler_name]:
+                        self._notified_handlers[handler_name].append(original_host)
                         display.vv("NOTIFIED HANDLER %s" % (handler_name,))
 
                 elif result[0] == 'register_host_var':
                     # essentially the same as 'set_host_var' below, however we
                     # never follow the delegate_to value for registered vars and
                     # the variable goes in the fact_cache
-                    host      = result[1]
+                    host      = get_original_host(result[1])
                     task      = result[2]
                     var_value = wrap_var(result[3])
                     var_name  = task.register
@@ -278,7 +293,7 @@ class StrategyBase:
                         self._variable_manager.set_nonpersistent_facts(target_host, {var_name: var_value})
 
                 elif result[0] in ('set_host_var', 'set_host_facts'):
-                    host = result[1]
+                    host = get_original_host(result[1])
                     task = result[2]
                     item = result[3]
 
@@ -297,24 +312,25 @@ class StrategyBase:
                     else:
                         actual_host = host
 
+                    if task.run_once:
+                        host_list = [host for host in self._inventory.get_hosts(iterator._play.hosts) if host.name not in self._tqm._unreachable_hosts]
+                    else:
+                        host_list = [actual_host]
+
                     if result[0] == 'set_host_var':
                         var_name  = result[4]
                         var_value = result[5]
-
-                        if task.run_once:
-                            host_list = [host for host in self._inventory.get_hosts(iterator._play.hosts) if host.name not in self._tqm._unreachable_hosts]
-                        else:
-                            host_list = [actual_host]
-
                         for target_host in host_list:
                             self._variable_manager.set_host_variable(target_host, var_name, var_value)
                     elif result[0] == 'set_host_facts':
                         facts = result[4]
-                        if task.action == 'set_fact':
-                            self._variable_manager.set_nonpersistent_facts(actual_host, facts)
-                        else:
-                            self._variable_manager.set_host_facts(actual_host, facts)
-
+                        for target_host in host_list:
+                            if task.action == 'set_fact':
+                                self._variable_manager.set_nonpersistent_facts(target_host, facts)
+                            else:
+                                self._variable_manager.set_host_facts(target_host, facts)
+                elif result[0].startswith('v2_playbook_item') or result[0] == 'v2_playbook_retry':
+                    self._tqm.send_callback(result[0], result[1])
                 else:
                     raise AnsibleError("unknown result message received: %s" % result[0])
 
@@ -361,9 +377,8 @@ class StrategyBase:
             allgroup.add_host(new_host)
 
         # Set/update the vars for this host
-        new_vars = host_info.get('host_vars', dict())
-        new_host.vars = self._inventory.get_host_vars(new_host)
-        new_host.vars.update(new_vars)
+        new_host.vars = combine_vars(new_host.vars, self._inventory.get_host_vars(new_host))
+        new_host.vars = combine_vars(new_host.vars,  host_info.get('host_vars', dict()))
 
         new_groups = host_info.get('groups', [])
         for group_name in new_groups:
@@ -438,7 +453,7 @@ class StrategyBase:
             block_list = load_list_of_blocks(
                 data,
                 play=included_file._task._block._play,
-                parent_block=included_file._task._block,
+                parent_block=None,
                 task_include=included_file._task,
                 role=included_file._task._role,
                 use_handlers=is_handler,
@@ -454,7 +469,7 @@ class StrategyBase:
             # mark all of the hosts including this file as failed, send callbacks,
             # and increment the stats for this host
             for host in included_file._hosts:
-                tr = TaskResult(host=host, task=included_file._task, return_data=dict(failed=True, reason=str(e)))
+                tr = TaskResult(host=host, task=included_file._task, return_data=dict(failed=True, reason=to_unicode(e)))
                 iterator.mark_host_failed(host)
                 self._tqm._failed_hosts[host.name] = True
                 self._tqm._stats.increment('failures', host.name)
@@ -464,11 +479,7 @@ class StrategyBase:
         # set the vars for this task from those specified as params to the include
         for b in block_list:
             # first make a copy of the including task, so that each has a unique copy to modify
-            # FIXME: not sure if this is the best way to fix this, as we might be losing
-            #        information in the copy. Previously we assigned the include params to
-            #        the block variables directly, which caused other problems, so we may
-            #        need to figure out a third option if this also presents problems.
-            b._task_include = b._task_include.copy(exclude_block=True)
+            b._task_include = b._task_include.copy()
             # then we create a temporary set of vars to ensure the variable reference is unique
             temp_vars = b._task_include.vars.copy()
             temp_vars.update(included_file._args.copy())
@@ -477,10 +488,10 @@ class StrategyBase:
             # error so that users know not to specify them both ways
             tags = temp_vars.pop('tags', [])
             if isinstance(tags, string_types):
-                tags = [ tags ]
+                tags = tags.split(',')
             if len(tags) > 0:
                 if len(b._task_include.tags) > 0:
-                    raise AnsibleParserError("Include tasks should not specify tags in more than one way (both via args and directly on the task)",
+                    raise AnsibleParserError("Include tasks should not specify tags in more than one way (both via args and directly on the task). Mixing tag specify styles is prohibited for whole import hierarchy, not only for single import statement",
                             obj=included_file._task._ds)
                 display.deprecated("You should not specify tags in the include parameters. All tags should be specified using the task-level option")
                 b._task_include.tags = tags
@@ -533,7 +544,10 @@ class StrategyBase:
         #    self._tqm.send_callback('v2_playbook_on_no_hosts_remaining')
         #    result = False
         #    break
+        saved_name = handler.name
+        handler.name = handler_name
         self._tqm.send_callback('v2_playbook_on_handler_task_start', handler)
+        handler.name = saved_name
 
         if notified_hosts is None:
             notified_hosts = self._notified_handlers[handler_name]
@@ -565,6 +579,7 @@ class StrategyBase:
                 host_results,
                 self._tqm,
                 iterator=iterator,
+                inventory=self._inventory,
                 loader=self._loader,
                 variable_manager=self._variable_manager
             )
@@ -583,6 +598,7 @@ class StrategyBase:
                         for task in block.block:
                             result = self._do_handler_run(
                                 handler=task,
+                                handler_name=None,
                                 iterator=iterator,
                                 play_context=play_context,
                                 notified_hosts=included_file._hosts[:],
@@ -639,5 +655,10 @@ class StrategyBase:
             self._inventory.refresh_inventory()
         #elif meta_action == 'reset_connection':
         #    connection_info.connection.close()
+        elif meta_action == 'clear_host_errors':
+            self._tqm._failed_hosts = dict()
+            self._tqm._unreachable_hosts = dict()
+            for host in iterator._host_states:
+                iterator._host_states[host].fail_state = iterator.FAILED_NONE
         else:
             raise AnsibleError("invalid meta action requested: %s" % meta_action, obj=task._ds)

@@ -41,7 +41,7 @@ Each playbook is composed of one or more 'plays' in a list.
 
 The goal of a play is to map a group of hosts to some well defined roles, represented by
 things ansible calls tasks.  At a basic level, a task is nothing more than a call
-to an ansible module, which you should have learned about in earlier chapters.
+to an ansible module (see :doc:`Modules`).
 
 By composing a playbook of multiple 'plays', it is possible to
 orchestrate multi-machine deployments, running certain steps on all
@@ -180,9 +180,9 @@ Support for running things as another user is also available (see :doc:`become`)
     ---
     - hosts: webservers
       remote_user: yourname
-      sudo: yes
+      become: yes
 
-You can also use sudo on a particular task instead of the whole play::
+You can also use become on a particular task instead of the whole play::
 
     ---
     - hosts: webservers

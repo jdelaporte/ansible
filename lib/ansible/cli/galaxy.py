@@ -39,6 +39,7 @@ from ansible.galaxy.role import GalaxyRole
 from ansible.galaxy.login import GalaxyLogin
 from ansible.galaxy.token import GalaxyToken
 from ansible.playbook.role.requirement import RoleRequirement
+from ansible.utils.unicode import to_unicode
 
 try:
     from __main__ import display
@@ -48,49 +49,13 @@ except ImportError:
 
 class GalaxyCLI(CLI):
 
-    available_commands = {
-        "delete":    "remove a role from Galaxy",
-        "import":    "add a role contained in a GitHub repo to Galaxy",
-        "info":      "display details about a particular role",
-        "init":      "create a role directory structure in your roles path",
-        "install":   "download a role into your roles path",
-        "list":      "enumerate roles found in your roles path",
-        "login":     "authenticate with Galaxy API and store the token",
-        "remove":    "delete a role from your roles path",
-        "search":    "query the Galaxy API",
-        "setup":     "add a TravisCI integration to Galaxy",
-    }
-
     SKIP_INFO_KEYS = ("name", "description", "readme_html", "related", "summary_fields", "average_aw_composite", "average_aw_score", "url" )
-
+    VALID_ACTIONS = ("delete", "import", "info", "init", "install", "list", "login", "remove", "search", "setup")
+    
     def __init__(self, args):
-        self.VALID_ACTIONS = self.available_commands.keys()
-        self.VALID_ACTIONS.sort()
         self.api = None
         self.galaxy = None
         super(GalaxyCLI, self).__init__(args)
-
-    def set_action(self):
-        """
-        Get the action the user wants to execute from the sys argv list.
-        """
-        for i in range(0,len(self.args)):
-            arg = self.args[i]
-            if arg in self.VALID_ACTIONS:
-                self.action = arg
-                del self.args[i]
-                break
-
-        if not self.action:
-            self.show_available_actions()
-
-    def show_available_actions(self):
-        # list available commands
-        display.display(u'\n' + "usage: ansible-galaxy COMMAND [--help] [options] ...")
-        display.display(u'\n' + "availabe commands:" + u'\n\n')
-        for key in self.VALID_ACTIONS:
-            display.display(u'\t' + "%-12s %s" % (key, self.available_commands[key]))
-        display.display(' ')
 
     def parse(self):
         ''' create an options parser for bin/ansible '''
@@ -107,11 +72,11 @@ class GalaxyCLI(CLI):
             self.parser.set_usage("usage: %prog delete [options] github_user github_repo")
         elif self.action == "import":
             self.parser.set_usage("usage: %prog import [options] github_user github_repo")
-            self.parser.add_option('-n', '--no-wait', dest='wait', action='store_false', default=True,
+            self.parser.add_option('--no-wait', dest='wait', action='store_false', default=True,
                 help='Don\'t wait for import results.')
-            self.parser.add_option('-b', '--branch', dest='reference',
+            self.parser.add_option('--branch', dest='reference',
                 help='The name of a branch to import. Defaults to the repository\'s default branch (usually master)')
-            self.parser.add_option('-t', '--status', dest='check_status', action='store_true', default=False,
+            self.parser.add_option('--status', dest='check_status', action='store_true', default=False,
                 help='Check the status of the most recent import request for given github_user/github_repo.')
         elif self.action == "info":
             self.parser.set_usage("usage: %prog info [options] role_name[,version]")
@@ -136,7 +101,7 @@ class GalaxyCLI(CLI):
             self.parser.set_usage("usage: %prog list [role_name]")
         elif self.action == "login":
             self.parser.set_usage("usage: %prog login [options]")
-            self.parser.add_option('-g','--github-token', dest='token', default=None,
+            self.parser.add_option('--github-token', dest='token', default=None,
                 help='Identify with github token rather than username and password.')
         elif self.action == "search":
             self.parser.add_option('--platforms', dest='platforms',
@@ -147,15 +112,14 @@ class GalaxyCLI(CLI):
                 help='GitHub username')
             self.parser.set_usage("usage: %prog search [searchterm1 searchterm2] [--galaxy-tags galaxy_tag1,galaxy_tag2] [--platforms platform1,platform2] [--author username]")
         elif self.action == "setup":
-            self.parser.set_usage("usage: %prog setup [options] source github_user github_repo secret" +
-                u'\n\n' + "Create an integration with travis.")
-            self.parser.add_option('-r', '--remove', dest='remove_id', default=None,
+            self.parser.set_usage("usage: %prog setup [options] source github_user github_repo secret")
+            self.parser.add_option('--remove', dest='remove_id', default=None,
                 help='Remove the integration matching the provided ID value. Use --list to see ID values.')
-            self.parser.add_option('-l', '--list', dest="setup_list", action='store_true', default=False,
+            self.parser.add_option('--list', dest="setup_list", action='store_true', default=False,
                 help='List all of your integrations.')
 
         # options that apply to more than one action
-        if not self.action in ("config","import","init","login","setup"):
+        if not self.action in ("delete","import","init","login","setup"):
             self.parser.add_option('-p', '--roles-path', dest='roles_path', default=C.DEFAULT_ROLES_PATH,
                 help='The path to the directory containing your roles. '
                      'The default is the roles_path configured in your '
@@ -164,26 +128,21 @@ class GalaxyCLI(CLI):
         if self.action in ("import","info","init","install","login","search","setup","delete"):
             self.parser.add_option('-s', '--server', dest='api_server', default=C.GALAXY_SERVER,
                 help='The API server destination')
-            self.parser.add_option('-c', '--ignore-certs', action='store_false', dest='validate_certs', default=True,
+            self.parser.add_option('-c', '--ignore-certs', action='store_true', dest='ignore_certs', default=False,
                 help='Ignore SSL certificate validation errors.')
 
         if self.action in ("init","install"):
             self.parser.add_option('-f', '--force', dest='force', action='store_true', default=False,
                 help='Force overwriting an existing role')
 
-        if self.action:
-            # get options, args and galaxy object
-            self.options, self.args =self.parser.parse_args()
-            display.verbosity = self.options.verbosity
-            self.galaxy = Galaxy(self.options)
+        self.options, self.args =self.parser.parse_args()
+        display.verbosity = self.options.verbosity
+        self.galaxy = Galaxy(self.options)
 
         return True
 
     def run(self):
-
-        if not self.action:
-            return True
-
+        
         super(GalaxyCLI, self).run()
 
         # if not offline, get connect to galaxy api
@@ -203,8 +162,8 @@ class GalaxyCLI(CLI):
 
     def _display_role_info(self, role_info):
 
-        text = "\nRole: %s \n" % role_info['name']
-        text += "\tdescription: %s \n" % role_info.get('description', '')
+        text = [u"", u"Role: %s" % to_unicode(role_info['name'])]
+        text.append(u"\tdescription: %s" % role_info.get('description', ''))
 
         for k in sorted(role_info.keys()):
 
@@ -213,14 +172,15 @@ class GalaxyCLI(CLI):
 
             if isinstance(role_info[k], dict):
                 text += "\t%s: \n" % (k)
+                text.append(u"\t%s:" % (k))
                 for key in sorted(role_info[k].keys()):
                     if key in self.SKIP_INFO_KEYS:
                         continue
-                    text += "\t\t%s: %s\n" % (key, role_info[k][key])
+                    text.append(u"\t\t%s: %s" % (key, role_info[k][key]))
             else:
-                text += "\t%s: %s\n" % (k, role_info[k])
+                text.append(u"\t%s: %s" % (k, role_info[k]))
 
-        return text
+        return u'\n'.join(text)
 
 ############################
 # execute actions
@@ -364,9 +324,11 @@ class GalaxyCLI(CLI):
             if role_spec:
                 role_info.update(role_spec)
 
-            data += self._display_role_info(role_info)
+            data = self._display_role_info(role_info)
+            ### FIXME: This is broken in both 1.9 and 2.0 as
+            # _display_role_info() always returns something
             if not data:
-                data += "\n- the role %s was not found" % role
+                data = u"\n- the role %s was not found" % role
 
         self.pager(data)
 
@@ -427,7 +389,8 @@ class GalaxyCLI(CLI):
             # roles were specified directly, so we'll just go out grab them
             # (and their dependencies, unless the user doesn't want us to).
             for rname in self.args:
-                roles_left.append(GalaxyRole(self.galaxy, rname.strip()))
+                role = RoleRequirement.role_yaml_parse(rname.strip())
+                roles_left.append(GalaxyRole(self.galaxy, **role))
 
         for role in roles_left:
             display.vvv('Installing role %s ' % role.name)
@@ -547,7 +510,7 @@ class GalaxyCLI(CLI):
             terms = []
             for i in range(len(self.args)):
                terms.append(self.args.pop())
-            search = '+'.join(terms)
+            search = '+'.join(terms[::-1])
 
         if not search and not self.options.platforms and not self.options.tags and not self.options.author:
             raise AnsibleError("Invalid query. At least one search term, platform, galaxy tag or author must be provided.")
@@ -556,27 +519,28 @@ class GalaxyCLI(CLI):
             tags=self.options.tags, author=self.options.author, page_size=page_size)
 
         if response['count'] == 0:
-            display.display("No roles match your search.", color="yellow")
+            display.display("No roles match your search.", color=C.COLOR_ERROR)
             return True
 
-        data = ''
+        data = [u'']
 
         if response['count'] > page_size:
-            data += ("Found %d roles matching your search. Showing first %s.\n" % (response['count'], page_size))
+            data.append(u"Found %d roles matching your search. Showing first %s." % (response['count'], page_size))
         else:
-            data += ("Found %d roles matching your search:\n" % response['count'])
+            data.append(u"Found %d roles matching your search:" % response['count'])
 
         max_len = []
         for role in response['results']:
             max_len.append(len(role['username'] + '.' + role['name']))
         name_len = max(max_len)
-        format_str = " %%-%ds %%s\n" % name_len
-        data +='\n'
-        data += (format_str % ("Name", "Description"))
-        data += (format_str % ("----", "-----------"))
+        format_str = u" %%-%ds %%s" % name_len
+        data.append(u'')
+        data.append(format_str % (u"Name", u"Description"))
+        data.append(format_str % (u"----", u"-----------"))
         for role in response['results']:
-            data += (format_str % (role['username'] + '.' + role['name'],role['description']))
+            data.append(format_str % (u'%s.%s' % (role['username'], role['name']), role['description']))
 
+        data = u'\n'.join(data)
         self.pager(data)
 
         return True
@@ -612,10 +576,10 @@ class GalaxyCLI(CLI):
 
         colors = {
             'INFO':    'normal',
-            'WARNING': 'yellow',
-            'ERROR':   'red',
-            'SUCCESS': 'green',
-            'FAILED':  'red'
+            'WARNING': C.COLOR_WARN,
+            'ERROR':   C.COLOR_ERROR,
+            'SUCCESS': C.COLOR_OK,
+            'FAILED': C.COLOR_ERROR,
         }
 
         if len(self.args) < 2:
@@ -634,11 +598,10 @@ class GalaxyCLI(CLI):
                 # found multiple roles associated with github_user/github_repo
                 display.display("WARNING: More than one Galaxy role associated with Github repo %s/%s." % (github_user,github_repo),
                     color='yellow')
-                display.display("The following Galaxy roles are being updated:" + u'\n', color='yellow')
+                display.display("The following Galaxy roles are being updated:" + u'\n', color=C.COLOR_CHANGED)
                 for t in task:
-                    display.display('%s.%s' % (t['summary_fields']['role']['namespace'],t['summary_fields']['role']['name']), color='yellow')
-                display.display(u'\n' + "To properly namespace this role, remove each of the above and re-import %s/%s from scratch" % (github_user,github_repo),
-                    color='yellow')
+                    display.display('%s.%s' % (t['summary_fields']['role']['namespace'],t['summary_fields']['role']['name']), color=C.COLOR_CHANGED)
+                display.display(u'\n' + "To properly namespace this role, remove each of the above and re-import %s/%s from scratch" % (github_user,github_repo), color=C.COLOR_CHANGED)
                 return 0
             # found a single role as expected
             display.display("Successfully submitted import request %d" % task[0]['id'])
@@ -675,17 +638,17 @@ class GalaxyCLI(CLI):
                 # None found
                 display.display("No integrations found.")
                 return 0
-            display.display(u'\n' + "ID         Source     Repo", color="green")
-            display.display("---------- ---------- ----------", color="green")
+            display.display(u'\n' + "ID         Source     Repo", color=C.COLOR_OK)
+            display.display("---------- ---------- ----------", color=C.COLOR_OK)
             for secret in secrets:
                 display.display("%-10s %-10s %s/%s" % (secret['id'], secret['source'], secret['github_user'],
-                    secret['github_repo']),color="green")
+                    secret['github_repo']),color=C.COLOR_OK)
             return 0
 
         if self.options.remove_id:
             # Remove a secret
             self.api.remove_secret(self.options.remove_id)
-            display.display("Secret removed. Integrations using this secret will not longer work.", color="green")
+            display.display("Secret removed. Integrations using this secret will not longer work.", color=C.COLOR_OK)
             return 0
 
         if len(self.args) < 4:
@@ -724,4 +687,3 @@ class GalaxyCLI(CLI):
         display.display(resp['status'])
 
         return True
-
